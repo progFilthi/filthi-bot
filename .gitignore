@@ -17,3 +17,6 @@ mql5/*.log
 
 # OS noise
 .DS_Store
+
+# IDE
+.idea/
