@@ -19,7 +19,8 @@
 //| "close-<ticket>".                                                |
 //+------------------------------------------------------------------+
 #property copyright "filthi-bot"
-#property version   "0.1.0"
+#property version   "1.00"
+#property description "Phase 0 bridge EA: TCP client to the Rust engine. Add 127.0.0.1 to the allowed URL list (Options > Expert Advisors) for sockets to work."
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -473,7 +474,7 @@ bool Send(const string line)
       return false;
    ArrayResize(data, n);
    ResetLastError();
-   int sent = SocketWrite(g_sock, data);
+   int sent = SocketSend(g_sock, data, (uint)n);
    if(sent != n)
    {
       Print("[bridge] SocketWrite failed sent=", sent, " of ", n, " err=", GetLastError());
@@ -526,6 +527,11 @@ string RejectJson(const string order_id, const long retcode, const string reason
           ",\"order_id\":\"" + JEsc(order_id) + "\"" +
           ",\"retcode\":" + IntegerToString(retcode) +
           ",\"reason\":\"" + JEsc(reason) + "\"}";
+}
+
+void SendReject(const string order_id, const long retcode, const string reason)
+{
+   Send(RejectJson(order_id, retcode, reason));
 }
 
 string RetcodeText(const uint rc)

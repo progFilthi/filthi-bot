@@ -309,7 +309,12 @@ impl Session {
                 if self.out.hello.is_none() {
                     self.out.stage("hello");
                 }
+                // Both copies: `out.hello` is the report artifact,
+                // `self.hello` is the working copy used by send_test_order
+                // and round(). (Only setting the report one left the working
+                // copy None -> "cannot send order before hello".)
                 self.out.hello = Some(info.clone());
+                self.hello = Some(info.clone());
                 if self.cfg.test_order.expect_demo && !info.demo {
                     return Step::Fatal(format!(
                         "EA reported demo={} but expect_demo=true; refusing to trade",
