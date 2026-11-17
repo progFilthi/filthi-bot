@@ -1,0 +1,26 @@
+# Phase 0 feasibility-spike configuration.
+# Proves: MT5 EA (Wine) -> TCP -> Rust server -> test order -> fill -> close.
+
+[server]
+host = "127.0.0.1"
+port = 5555
+
+[test_order]
+enabled = true
+lots = 0.01            # minimum lot; this is a connectivity test, not a signal
+sl_distance_pts = 100  # $1.00 stop distance on XAUUSD at point=0.01
+tp_rr = 2.0            # TP at 2R so nothing lingers if the close fails
+max_slippage_pts = 30
+magic = 424242
+expect_demo = true
+close_after_fill = true # exercise modify (tighten SL) then close
+
+[timeouts]
+hello_s = 10
+first_tick_s = 30
+fill_s = 30
+overall_s = 180
+stale_ms = 5000        # README: halt on >5s silence
+
+[transcript]
+path = "runs/phase0/transcript.jsonl"

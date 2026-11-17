@@ -1,0 +1,22 @@
+[package]
+name = "bridge"
+description = "TCP bridge between the Rust engine and the MT5 Bridge EA (NDJSON protocol)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xau-bridge-server"
+path = "src/main.rs"
+
+[dependencies]
+xau-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

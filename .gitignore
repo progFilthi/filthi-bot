@@ -1,0 +1,19 @@
+# Rust
+/target/
+
+# Data & runs
+/data/
+/runs/
+/logs/
+*.parquet
+
+# Local env
+.env
+
+# MQL5 build artifacts (compiled in the MT5 tree)
+*.ex5
+*.ex4
+mql5/*.log
+
+# OS noise
+.DS_Store

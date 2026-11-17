@@ -1,0 +1,12 @@
+[package]
+name = "xau-core"
+description = "Core domain types for the XAUUSD trading system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
