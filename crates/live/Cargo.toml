@@ -1,0 +1,21 @@
+[package]
+name = "xau-live"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xau-live"
+path = "src/main.rs"
+
+[dependencies]
+xau-core = { workspace = true }
+xau-sim = { path = "../simulator" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+ureq = { version = "2", default-features = false }
+
+[dev-dependencies]

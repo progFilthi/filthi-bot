@@ -39,3 +39,11 @@ path = "src/bin/breakdown.rs"
 [[bin]]
 name = "xau-probe"
 path = "src/bin/probe.rs"
+
+[[bin]]
+name = "xau-resample"
+path = "src/bin/resample.rs"
+
+[[bin]]
+name = "xau-tpsweep"
+path = "src/bin/tpsweep.rs"

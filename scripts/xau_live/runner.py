@@ -41,6 +41,9 @@ BARS = 420                 # EMA300 + Donchian55 + ATR14 with margin
 POLL_SECONDS = 60
 COMMENT = "D3"
 
+PERIOD = "H1"
+BAR_SECONDS = {"M5": 300, "M15": 900, "H1": 3600, "H4": 14400}
+
 ROOT = Path(__file__).resolve().parents[2]
 LIVE_DIR = ROOT / "runs" / "live"
 STATE_PATH = LIVE_DIR / "d3_state.json"
@@ -279,9 +282,10 @@ def maybe_enter(m: Mcp, state: dict, closed: list[dict], dry_run: bool) -> None:
 
 def pass_once(m: Mcp, state: dict, dry_run: bool) -> bool:
     """One poll. Returns True if a new bar was processed."""
-    h1 = m.bars("H1", BARS)
+    h1 = m.bars(PERIOD, BARS)
     now = m.now_utc()
-    closed = h1 if h1[-1]["ts"].timestamp() + 3600 <= now.timestamp() else h1[:-1]
+    span = BAR_SECONDS[PERIOD]
+    closed = h1 if h1[-1]["ts"].timestamp() + span <= now.timestamp() else h1[:-1]
     if not closed:
         return False
 
@@ -325,14 +329,23 @@ def pass_once(m: Mcp, state: dict, dry_run: bool) -> bool:
 
 # ---------------------------------------------------------------------------
 def main() -> int:
+    global LOT, PERIOD, STATE_PATH, LOG_PATH  # noqa: PLW0603
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="single pass, then exit")
     ap.add_argument("--dry-run", action="store_true", help="never send or modify orders")
     ap.add_argument("--allow-live", action="store_true", help="permit a real-money account")
+    ap.add_argument("--period", default="H1", choices=sorted(BAR_SECONDS), help="timeframe to trade")
+    ap.add_argument("--lots", type=float, default=LOT, help="position size")
     args = ap.parse_args()
 
+    LOT = args.lots
+    PERIOD = args.period
+    STATE_PATH = LIVE_DIR / f"d3_{PERIOD.lower()}_state.json"
+    LOG_PATH = LIVE_DIR / f"d3_{PERIOD.lower()}_runner.log"
+
     state = load_state()
-    log("runner_start", lot=LOT, dry_run=args.dry_run, symbol=SYMBOL,
+    log("runner_start", lot=LOT, dry_run=args.dry_run, symbol=SYMBOL, period=PERIOD,
         max_hold=S.MAX_HOLD_BARS, trail_atr=S.TRAIL_ATR)
 
     m: Mcp | None = None

@@ -338,6 +338,46 @@ running: entry `10009`, stop landed exactly at 1.5 × ATR with TP `None`, a
 trailing `trade_modify_sl_tp` moved the stop `3745.92 → 3746.07` (`10009`), and
 close `10009`. Net cost of the three round trips: a few cents.
 
+### The Rust runner — `xau-live` (added 2026-11-18)
+
+The Python runner above is a *re-implementation* of the engine. It was
+cross-checked on one bar (11 identical values), but a port can drift. `xau-live`
+removes that risk by calling `xau_sim::strategy` directly: the code that places
+orders is the code that produced the 17-year numbers.
+
+```bash
+cargo run -p xau-live -- --scan                     # read-only market read, all timeframes
+cargo run -p xau-live -- --period H4 --lots 0.1 --once --dry-run
+cargo run -p xau-live -- --period H4 --lots 0.1     # leave this running
+```
+
+`--scan` prints one line per timeframe — close, 55-bar channel, EMA300, ATR,
+and either the live signal with the stop it would place, or the distance price
+still needs to break out. It is the fastest way to answer "is there a trade
+here?" without touching an order.
+
+Design decisions worth knowing:
+
+- **One clock, no DST maths.** Bar labels arrive in the broker's clock and
+  `trade_server_last_known_time` is in the same clock, so "has this bar closed?"
+  compares two values from the same source. No UTC conversion, so no
+  spring/autumn hour bug.
+- **Adoption starts the clock at handover.** If the process restarts while a
+  position is open it adopts it, but the boundary is written to state and bars
+  that closed *before* adoption are excluded from the trail's best price and
+  from the 240-bar time exit. `best` re-seeds at the entry price, exactly as
+  `engine::backtest` seeds it.
+- **Ownership tags.** Orders are commented `D3-<PERIOD>`. A runner refuses to
+  adopt a position tagged for another timeframe, because trailing an H1 trade
+  with H4 ATR would put the stop in the wrong place (`--adopt-any` overrides).
+- **Order payloads are logged** before they are sent, so every live decision has
+  an audit trail in `runs/live/rust_<period>_runner.log`.
+
+Handover on 2026-11-18: the Python manager was stopped mid-position and
+`xau-live` adopted `59394653039` (`D3-H4`, 0.10 lot, stop 3814.09) without
+sending or modifying anything. Verified by diffing the broker position before
+and after.
+
 ### Demo acceptance checklist
 
 Run for **at least 8-12 weeks** (~75-110 trades) and require:
@@ -433,6 +473,10 @@ cargo run -p xau-sim --bin xau-report     -- --parquet data/cache_long/xauusd_h1
 cargo run -p xau-sim --bin xau-validate   -- --parquet data/cache_long/xauusd_h1.parquet --folds 6
 cargo run -p xau-sim --bin xau-walkforward -- --parquet data/cache_long/xauusd_h1.parquet
 cargo run -p xau-sim --bin xau-breakdown  -- --parquet data/cache_long/xauusd_h1.parquet
+cargo run -p xau-sim --bin xau-tpsweep    -- --parquet data/cache_long/xauusd_h1.parquet
+cargo run -p xau-sim --bin xau-resample   -- --in data/cache_long/xauusd_h1.parquet \
+                                            --out data/cache_long/xauusd_h4.parquet --secs 14400
+cargo run -p xau-sim --bin xau-tpsweep    -- --parquet data/cache_long/xauusd_h4.parquet
 ```
 
 Outputs behind this document are in `runs/backtest/` (`report-h1.txt`,
@@ -443,7 +487,61 @@ above to regenerate.
 The demo runner and its logs live in `scripts/xau_live/` and `runs/live/`; see
 §7 "The demo runner".
 
-## 12. Bottom line
+## 12. Two questions answered with data
+
+### 12.1 Does a take profit help?
+
+`xau-tpsweep` re-runs the whole engine with `tp_atr` set to a fixed multiple.
+Same data, same stop, same trail — only the target changes.
+
+**H1, 17 years (base: +$26,647, PF 1.32, 9.90% DD):**
+
+| TP (ATR) | PnL | PF | Max DD | Trades | TP exits |
+| --- | --- | --- | --- | --- | --- |
+| **none** | **+$26,647** | **1.32** | **9.90%** | 1,911 | 0 |
+| 1.5 | +$8,250 | 1.06 | 25.48% | 3,253 | 1,590 |
+| 2.0 | +$12,297 | 1.09 | 16.71% | 2,956 | 1,209 |
+| 3.0 | +$17,978 | 1.16 | 14.99% | 2,537 | 702 |
+| 4.0 | +$22,206 | 1.21 | 15.60% | 2,333 | 454 |
+| 6.0 | +$24,717 | 1.26 | 10.20% | 2,103 | 209 |
+| 8.0 | +$26,443 | 1.29 | 10.20% | 2,009 | 103 |
+| 10.0 | +$26,337 | 1.31 | 10.06% | 1,961 | 55 |
+
+Every take profit loses money on H1, and the tighter it is the worse it gets —
+1.5 ATR cuts PnL by 69% and *triples* the drawdown relative to no target. On H4
+the result is a wash at best (best TP, 4 ATR: +$28,464 vs +$27,907, inside
+noise). **No take profit is a measured decision, not an omission.** The trade
+ends on the trail, the original stop, or the 240-bar clock.
+
+### 12.2 Does the strategy work on H4?
+
+Asked because a live H4 signal appeared on 2026-11-18 and an untested timeframe
+should not carry size. H1 history was resampled to H4 (`xau-resample`, 26,832
+bars) and D3 re-run unchanged.
+
+| H4, 16 years | Result |
+| --- | --- |
+| Total PnL @ 0.10 lot | +$27,907 (+111.6%) |
+| Profit factor | 1.81 |
+| Max drawdown | 8.10% |
+| Trades | 531 (41.4% win) |
+| Avg win / avg loss | $282.59 / $110.17 |
+| Expectancy | $52.56/trade |
+| Years profitable | 15 of 17 (2014 −$669, 2017 −$82) |
+| Out-of-sample (last 30%) | PF 2.13 |
+| Exits | trail 382, stop 148, time 1 |
+
+Two caveats that matter: an H4 bar is an aggregate, so the order in which the
+stop, the trail and the close occurred inside it is unknown — H4 results are
+therefore *less* trustworthy than H1's, not more. And this is one timeframe on
+one instrument, not independent evidence of a new edge.
+
+**Live consequence:** the 2026-11-18 sell was taken on H4 at 0.10 lot ($504.90
+risk, 2.02% of equity) and is managed by `xau-live --period H4`. It is a
+*separate track* from the H1 demo record and is labelled as such (`D3-H4`), so
+it cannot be mistaken for evidence about the headline H1 strategy.
+
+## 13. Bottom line
 
 | Question | Answer |
 | --- | --- |
