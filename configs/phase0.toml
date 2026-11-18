@@ -1,5 +1,7 @@
 # Phase 0 feasibility-spike configuration.
 # Proves: MT5 EA (Wine) -> TCP -> Rust server -> test order -> fill -> close.
+# §3: Record contract specs in config: point size, contract size (100 oz),
+# min/max/step lot, and the lot size to use for trading.
 
 [server]
 host = "127.0.0.1"
@@ -7,13 +9,23 @@ port = 5555
 
 [test_order]
 enabled = true
-lots = 0.01            # minimum lot; this is a connectivity test, not a signal
-sl_distance_pts = 100  # $1.00 stop distance on XAUUSD at point=0.01
-tp_rr = 2.0            # TP at 2R so nothing lingers if the close fails
+lots = 0.01            # lot size for test orders (change to 0.10/1.00 for larger PnL)
+sl_distance_pts = 100  # stop distance in points (scales with lot size)
+tp_rr = 2.0            # take-profit as R multiple
 max_slippage_pts = 30
 magic = 424242
 expect_demo = true
 close_after_fill = true # exercise modify (tighten SL) then close
+
+[lot_size_sensitivity]
+# Sensitivity analysis levels: test multiple lot sizes via simulator
+# Each level: lots, expected SL/TP in dollars per full round trip
+levels = [
+    { lots = 0.01, sl_pts = 100, tp_pts = 200 },   # $1.00 / $2.00 per trade
+    { lots = 0.10, sl_pts = 100, tp_pts = 200 },   # $10.00 / $20.00 per trade
+    { lots = 1.00, sl_pts = 100, tp_pts = 200 },   # $100.00 / $200.00 per trade
+    { lots = 10.00, sl_pts = 100, tp_pts = 200 },  # $1000.00 / $2000.00 per trade
+]
 
 [timeouts]
 hello_s = 10
