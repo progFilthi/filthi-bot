@@ -35,3 +35,7 @@ path = "src/bin/report.rs"
 [[bin]]
 name = "xau-breakdown"
 path = "src/bin/breakdown.rs"
+
+[[bin]]
+name = "xau-probe"
+path = "src/bin/probe.rs"

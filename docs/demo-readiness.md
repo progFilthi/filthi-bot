@@ -290,6 +290,54 @@ What demo cannot prove:
   almost nothing about profitability. **Demo validates the machine, not the
   edge.**
 
+### The demo runner (added 2026-11-18)
+
+The demo session is driven by `scripts/xau_live/runner.py`, a Python port of
+the Rust engine that talks to the terminal over MCP. Nothing about the strategy
+is re-decided in Python: `strategy.py` was verified numerically against
+`crates/simulator/src/bin/probe.rs` (all 11 indicator values identical) before
+the first order.
+
+What it does each newly closed H1 bar:
+
+1. reconcile with the broker (adopt an orphan, or clear state if the stop filled)
+2. if in a position: time exit at 240 bars, else trail to 2.5 × ATR from the
+   best price (the broker holds the stop, so intrabar fills behave like the
+   engine)
+3. if flat: enter at market on a Donchian-55 breakout that agrees with EMA300,
+   stop at 1.5 × ATR, **no take profit**, no opposite-signal exit
+4. persist state to `runs/live/d3_state.json`, append to `runs/live/d3_runner.log`
+
+Safety properties: one position at a time, refuses to run on a non-demo
+account, halts at −25% equity, and never sends an order without a stop loss.
+
+```bash
+cd scripts/xau_live
+python3 preflight.py            # read-only gate; must print PREFLIGHT OK
+python3 runner.py --once --dry-run
+python3 runner.py               # leave this running
+```
+
+**MCP trading permission.** For most of 2026-11-18 every `trade_*` call was
+rejected with `trading is not permitted`, while reads and even
+`trade_order_calc_*` worked. It was not the MT5 AutoTrading button, not the
+account, and not the broker: it was the per-server trade permission in
+MT5's MCP/Assistant settings. Once that was granted, the same calls returned
+`retcode 0 / 10009 Done` on unchanged code. Note the endpoint/token split —
+`127.0.0.1:22346` (terminal) and `127.0.0.1:22345` (MetaEditor) are different
+servers; the token that works on 22346 is the one in `scripts/mcp.sh`.
+
+**AutoTrading still matters.** After a terminal restart the toolbar AutoTrading
+button comes back OFF and `experts_trade_allowed` reads `false`. Order sends
+need it on; it cannot be set through the API, so a terminal restart needs a
+human to press Ctrl+E. The runner logs the failure and retries rather than
+pretending it traded.
+
+Execution verified on the demo account at 0.01 lot before the loop was left
+running: entry `10009`, stop landed exactly at 1.5 × ATR with TP `None`, a
+trailing `trade_modify_sl_tp` moved the stop `3745.92 → 3746.07` (`10009`), and
+close `10009`. Net cost of the three round trips: a few cents.
+
 ### Demo acceptance checklist
 
 Run for **at least 8-12 weeks** (~75-110 trades) and require:
@@ -318,9 +366,11 @@ Live should follow demo only when all of these are true:
 2. The demo loss distribution matches the backtest — average loss near its
    planned risk, win rate near 36%. If real losses are systematically larger,
    execution is eating the edge.
-3. The MT5 **"Allow Algo Trading"** checkbox problem is solved. It currently
-   resets on every bridge restart (retcode 10027), which makes unattended live
-   trading impossible. This is a terminal setting; code cannot fix it.
+3. **Unattended operation without a human pressing Ctrl+E.** MCP order sends
+   need the terminal's AutoTrading button, which resets to OFF on every
+   terminal restart and cannot be set through the API (the EA path fails with
+   retcode 10027 for the same reason). Until that is automated — or the
+   terminal is left running untouched — every restart needs a human.
 4. **Position sizing is volatility-normalised**, not a fixed lot. See §9.
 5. A kill-switch exists: a maximum drawdown at which the bot stops and a human
    decides (suggested: 12%).
@@ -390,13 +440,16 @@ Outputs behind this document are in `runs/backtest/` (`report-h1.txt`,
 plus the `*-m15.txt` equivalents). `runs/` is gitignored — rerun the commands
 above to regenerate.
 
+The demo runner and its logs live in `scripts/xau_live/` and `runs/live/`; see
+§7 "The demo runner".
+
 ## 12. Bottom line
 
 | Question | Answer |
 | --- | --- |
 | Does the strategy have a measured edge? | **Yes** — 17 years, 14/17 positive, mean +0.12R/trade, both sides, survives 3× spread |
 | Is the edge concentrated in 2025-26? | **Less than it looks** — in R terms 2013 was the best year |
-| Is the bot mechanically ready? | **Yes** — protocol verified, 3 live round trips, 38 tests green |
+| Is the bot mechanically ready? | **Yes** — MCP entry/SL/modify/close all verified on the demo account, 38 tests green |
 | Is it ready for demo? | **Yes — start it** |
 | Is it ready for live? | **Not yet** — demo checklist, gap data, volatility sizing, Algo Trading fix |
 | What should we expect? | ~$1,470/yr at fixed 0.10 lot; lumpy, with multi-year flat periods |
