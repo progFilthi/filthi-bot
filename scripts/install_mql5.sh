@@ -49,7 +49,7 @@ compile_one() {
 FAILED=0
 compile_one "$REPO/mql5/Bridge.mq5" "Experts" || FAILED=1
 if [[ -f "$REPO/mql5/ExportHistory.mq5" ]]; then
-  cp "$REPO/mql5/ExportHistory.mq5" "$TERMINAL_DIR/MQL5/Scripts/ExportHistory.mq5" 2>/dev/null || true
+  compile_one "$REPO/mql5/ExportHistory.mq5" "Scripts" || FAILED=1
 fi
 
 exit $FAILED

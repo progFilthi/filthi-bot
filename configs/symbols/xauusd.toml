@@ -1,0 +1,26 @@
+# XAUUSD contract specs — recorded from the live terminal via
+# get_marketwatch_symbols on 2026-11-17 (MetaQuotes-Demo, account 115694190).
+# README §3: "Record contract specs in config: point size, contract size
+# (100 oz), tick value, min/max/step lot, stops level, margin rules."
+# server_utc_offset_s is verified seasonally by the daily-break histogram
+# in the data-quality report (EET/EEST = UTC+2 winter / UTC+3 summer).
+
+[symbol]
+name = "XAUUSD"
+digits = 2
+point = 0.01
+contract_size = 100.0     # 100 oz per lot
+tick_size = 0.01
+tick_value = 0.1          # as reported by broker (see docs/phase-1.md note)
+volume_min = 0.01
+volume_max = 100.0
+volume_step = 0.01
+stops_level_pts = 0
+freeze_level_pts = 0
+swap_mode = 1             # 1 = swap charged in points per day
+swap_long_pts = -12.6
+swap_short_pts = -4.6
+swap_rollover3day_dow = 3 # triple swap on Wednesday
+margin_initial = 0.0      # 'cfd leverage' margin mode: margin from leverage
+margin_maintenance = 0.0
+server_utc_offset_s = 7200

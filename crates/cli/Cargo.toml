@@ -1,0 +1,15 @@
+[package]
+name = "xau-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xau"
+path = "src/main.rs"
+
+[dependencies]
+xau-core = { workspace = true }
+xau-data = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

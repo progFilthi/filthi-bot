@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/bridge"]
+members = ["crates/core", "crates/bridge", "crates/data", "crates/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,7 +17,12 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
+csv = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+arrow = "54"
+parquet = { version = "54", features = ["arrow"] }
 xau-core = { path = "crates/core" }
+xau-data = { path = "crates/data" }
 
 [profile.release]
 lto = "thin"

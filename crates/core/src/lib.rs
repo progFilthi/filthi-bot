@@ -68,7 +68,12 @@ pub struct Bar {
     /// Tick volume as reported by the broker.
     pub volume: u64,
     /// Spread at the bar in points (per the broker's definition of point).
+    /// For native bars: the spread reported with the bar. For resampled
+    /// bars: the spread of the first (open) bar of the bucket.
     pub spread_pts: i64,
+    /// Worst-case spread in points. Equals `spread_pts` for native bars;
+    /// the max spread across the bucket for resampled bars.
+    pub spread_max: i64,
 }
 
 impl Bar {
@@ -157,6 +162,7 @@ mod tests {
             close: 2650.5,
             volume: 100,
             spread_pts: 20,
+            spread_max: 20,
         };
         assert!(good.is_consistent());
         let bad = Bar {
