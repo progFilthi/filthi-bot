@@ -171,7 +171,7 @@ fn main() -> anyhow::Result<()> {
         median(ranges.clone()),
         percentile(ranges, 0.95)
     );
-    println!("ATR(1m):   ${:.3}  (for reference, 20 pts spread = $0.20)", atr);
+    println!("ATR(1 bar): ${:.3}  (for reference, 20 pts spread = $0.20)", atr);
     println!(
         "Spread:    mean {:.1} pts | median {:.1} | p95 {:.1} | max {:.1}",
         mean(&spreads),
@@ -184,8 +184,19 @@ fn main() -> anyhow::Result<()> {
         median(spreads.clone()) * 0.01 / atr * 100.0
     );
 
+    // ---- Bar spacing (period-aware; the analyzer must work on M1 and H1) ----
+    let mut diffs: Vec<f64> = bars
+        .windows(2)
+        .map(|w| (w[1].ts - w[0].ts) as f64)
+        .filter(|d| *d > 0.0)
+        .collect();
+    diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let spacing = if diffs.is_empty() { 60.0 } else { diffs[diffs.len() / 2] };
+    println!("\nBar spacing (median): {:.0}s | bars/hour {:.1}", spacing, 3600.0 / spacing);
+
     // ---- The decisive test: momentum or mean reversion? ----
-    let max_gap = 5 * 60;
+    // Drop only genuine session gaps: anything longer than 2 bar periods.
+    let max_gap = (spacing * 2.0) as i64;
     let r1 = log_returns(&bars, max_gap);
     println!("\n=== MOMENTUM vs MEAN REVERSION ===");
     println!("Usable 1-bar returns: {}", r1.len());

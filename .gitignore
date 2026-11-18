@@ -20,3 +20,7 @@ mql5/*.log
 
 # IDE
 .idea/
+
+# Python
+__pycache__/
+*.pyc

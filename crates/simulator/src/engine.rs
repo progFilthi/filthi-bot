@@ -111,6 +111,8 @@ pub struct Position {
     pub atr_at_entry: f64,
     pub best: f64,
     pub lots: f64,
+    /// True once the trailing stop has moved the stop from its initial price.
+    pub trailed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -182,7 +184,13 @@ pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> R
             let mut exit: Option<(f64, ExitReason)> = None;
             if hit_stop {
                 // Pessimistic: stop fills before target when both are touched.
-                let reason = if p.tp > 0.0 { ExitReason::StopLoss } else { ExitReason::Trail };
+                // Distinguish the original stop from a stop that has trailed up
+                // into profit, so the exit mix is reported honestly.
+                let reason = if p.trailed {
+                    ExitReason::Trail
+                } else {
+                    ExitReason::StopLoss
+                };
                 exit = Some((p.sl, reason));
             } else if hit_target {
                 exit = Some((p.tp, ExitReason::TakeProfit));
@@ -228,12 +236,14 @@ pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> R
                                 let cand = p.best - dist;
                                 if cand > p.sl {
                                     p.sl = cand;
+                                    p.trailed = true;
                                 }
                             }
                             Side::Sell => {
                                 let cand = p.best + dist;
                                 if cand < p.sl {
                                     p.sl = cand;
+                                    p.trailed = true;
                                 }
                             }
                         }
@@ -268,6 +278,7 @@ pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> R
                         atr_at_entry: a,
                         best: entry,
                         lots: cfg.lots,
+                        trailed: false,
                     });
                 }
             }

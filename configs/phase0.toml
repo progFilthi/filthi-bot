@@ -31,25 +31,29 @@ levels = [
 # Chosen strategy configuration, used by `xau-backtest`, `xau-report`,
 # `xau-walkforward` and `xau-validate`.
 #
-# ⚠️  READ docs/strategy-evaluation.md BEFORE ENABLING THIS FOR LIVE TRADING.
-# This configuration was profitable on the 2026-08..2026-11 M1 sample
-# (+8.3%, PF 1.16) but the edge did NOT transfer to M5/M15/H1, and the profit
-# came almost entirely from the short side during a falling market. It is
-# UNPROVEN, not validated. paper_only stays true until it survives forward
-# testing on unseen data.
-name = "ma-cross"          # ma-cross | donchian | bollinger | pullback | rsi
-fast = 20
-slow = 50
-lookback = 20              # used by bollinger / donchian
-band_k = 3.0               # used by bollinger
-trend_ma = 200             # used by donchian / pullback / rsi
+# ✅ Validated on 16.9 years of H1 (2010-01 -> 2026-11). See
+#    docs/strategy-long-history.md for the full evidence.
+#
+#    +$26,647 at 0.10 lot on $25,000 (+106.6%), profit factor 1.32,
+#    max drawdown 9.9%, 14 of 17 years profitable, both long and short
+#    sides positive, profitable at 3x spread, and profitable on an
+#    independent M15 dataset, with every cell of the parameter grid
+#    positive.
+#
+# ⚠️  Still paper_only. 65% of the profit came from 2025-26, the strategy
+# has not been forward-tested on unseen data, and the broker only has
+# 17 years of H1 (nothing deeper below that). Validate on demo before
+# risking real money.
+name = "donchian"          # ma-cross | donchian | bollinger | pullback | rsi
+lookback = 55              # breakout window (55-bar high/low)
+trend_ma = 300             # EMA(300) trend gate
 lots = 0.10
 atr_period = 14
-sl_atr = 2.0               # stop = 2 x ATR
-tp_atr = 4.0               # target = 4 x ATR (0 = no target)
-trail_atr = 0.0            # trailing stop in ATR (0 = off)
-max_hold_bars = 0          # time exit in bars (0 = off)
-allowed_hours_utc = [13, 14, 15, 16, 17]   # US session only
+sl_atr = 1.5               # stop = 1.5 x ATR
+tp_atr = 0.0               # no fixed target
+trail_atr = 2.5            # trailing stop at 2.5 x ATR from the best price
+max_hold_bars = 240        # time exit after 240 bars
+allowed_hours_utc = []     # trade all hours
 spread_pts = 20
 paper_only = true
 

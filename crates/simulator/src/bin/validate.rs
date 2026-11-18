@@ -99,6 +99,20 @@ fn shortlist() -> Vec<(String, StratKind, StratParams, EngineConfig)> {
         c4,
     ));
 
+    // --- Candidate D3: refined Donchian (EMA300 + 2.5 ATR trail) ---
+    let mut c6 = cfg_base();
+    c6.sl_atr = 1.5;
+    c6.tp_atr = 0.0;
+    c6.trail_atr = 2.5;
+    c6.max_hold_bars = 240;
+    c6.exit_on_opposite = false;
+    out.push((
+        "D3 donchian55 trail2.5 ema300".into(),
+        StratKind::Donchian,
+        StratParams { lookback: 55, trend_ma: 300, ..Default::default() },
+        c6,
+    ));
+
     // --- Candidate C: Donchian long-horizon with trail (best OOS trend) ---
     let mut c5 = cfg_base();
     c5.sl_atr = 1.5;
@@ -234,6 +248,49 @@ fn main() -> anyhow::Result<()> {
             print!("{:>12.0}", m.total_pnl);
         }
         println!();
+    }
+
+    // ---- Donchian sensitivity: the leading family on long history ----
+    println!("\n=== PARAMETER SENSITIVITY: Donchian breakout (SL 1.5 ATR, hold 240, EMA200) ===");
+    println!("total PnL over the full sample; a real edge should fill the grid, not one cell");
+    print!("{:<14}", "trail\\lookback");
+    for lb in [20usize, 40, 55, 80, 100] {
+        print!("{:>10}", format!("lb{}", lb));
+    }
+    println!();
+    for trail in [2.0f64, 2.5, 3.0] {
+        print!("{:<14}", format!("trail={}", trail));
+        for lb in [20usize, 40, 55, 80, 100] {
+            let mut cfg = cfg_base();
+            cfg.sl_atr = 1.5;
+            cfg.tp_atr = 0.0;
+            cfg.trail_atr = trail;
+            cfg.max_hold_bars = 240;
+            cfg.exit_on_opposite = false;
+            let p = StratParams { lookback: lb, trend_ma: 200, ..Default::default() };
+            let sig = entry_signals(&bars, StratKind::Donchian, &p);
+            let m = run(&bars, &sig, &cfg);
+            print!("{:>10.0}", m.total_pnl);
+        }
+        println!();
+    }
+
+    // ---- Trend filter: is the EMA200 gate actually helping? ----
+    println!("\n=== TREND FILTER ABLATION: Donchian 55, trail 2, hold 240 ===");
+    for (name, trend) in [("no filter", 1usize), ("EMA100", 100), ("EMA200", 200), ("EMA300", 300)] {
+        let mut cfg = cfg_base();
+        cfg.sl_atr = 1.5;
+        cfg.tp_atr = 0.0;
+        cfg.trail_atr = 2.0;
+        cfg.max_hold_bars = 240;
+        cfg.exit_on_opposite = false;
+        let p = StratParams { lookback: 55, trend_ma: trend, ..Default::default() };
+        let sig = entry_signals(&bars, StratKind::Donchian, &p);
+        let m = run(&bars, &sig, &cfg);
+        println!(
+            "  {:<10} trades {:>5}  pnl {:>11.2}  PF {:>5.2}  win {:>5.1}%  maxDD {:>5.1}%",
+            name, m.trades, m.total_pnl, m.profit_factor, m.win_rate, m.max_drawdown_pct
+        );
     }
 
     // ---- Cost sensitivity on the best candidate ----
