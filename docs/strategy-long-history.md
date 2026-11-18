@@ -4,6 +4,8 @@
 **Data:** 98,799 H1 bars, 2010-01-03 → 2026-11-18 (16.9 years), true UTC
 **Lots:** 0.10 (fixed, non-compounding) | **Deposit:** $25,000 | **Spread:** 20 pts
 
+> Operational verdict and demo/live readiness: `docs/demo-readiness.md`.
+
 ---
 
 ## TL;DR
