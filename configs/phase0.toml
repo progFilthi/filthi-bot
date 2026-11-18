@@ -27,6 +27,32 @@ levels = [
     { lots = 10.00, sl_pts = 100, tp_pts = 200 },  # $1000.00 / $2000.00 per trade
 ]
 
+[strategy]
+# Chosen strategy configuration, used by `xau-backtest`, `xau-report`,
+# `xau-walkforward` and `xau-validate`.
+#
+# ⚠️  READ docs/strategy-evaluation.md BEFORE ENABLING THIS FOR LIVE TRADING.
+# This configuration was profitable on the 2026-08..2026-11 M1 sample
+# (+8.3%, PF 1.16) but the edge did NOT transfer to M5/M15/H1, and the profit
+# came almost entirely from the short side during a falling market. It is
+# UNPROVEN, not validated. paper_only stays true until it survives forward
+# testing on unseen data.
+name = "ma-cross"          # ma-cross | donchian | bollinger | pullback | rsi
+fast = 20
+slow = 50
+lookback = 20              # used by bollinger / donchian
+band_k = 3.0               # used by bollinger
+trend_ma = 200             # used by donchian / pullback / rsi
+lots = 0.10
+atr_period = 14
+sl_atr = 2.0               # stop = 2 x ATR
+tp_atr = 4.0               # target = 4 x ATR (0 = no target)
+trail_atr = 0.0            # trailing stop in ATR (0 = off)
+max_hold_bars = 0          # time exit in bars (0 = off)
+allowed_hours_utc = [13, 14, 15, 16, 17]   # US session only
+spread_pts = 20
+paper_only = true
+
 [timeouts]
 hello_s = 10
 first_tick_s = 30

@@ -3,10 +3,12 @@
 //! kill-switch (max drawdown halt), and metrics report.
 //! No look-ahead: signals on bar close only; fill at next open.
 
+pub mod engine;
+pub mod strategy;
+
 use std::collections::VecDeque;
 use xau_core::{Bar, Side};
 use rand::SeedableRng;
-use serde::{Deserialize, Serialize};
 
 /// Cost parameters for the simulator.
 #[derive(Debug, Clone, Default)]
@@ -95,6 +97,7 @@ pub struct SimulationReport {
 }
 
 /// Minimal simulator struct.
+#[allow(dead_code)]
 pub struct Simulator {
     config: SimConfig,
     pending: VecDeque<Order>,
@@ -107,7 +110,7 @@ pub struct Simulator {
 impl Simulator {
     pub fn new(config: &SimConfig) -> anyhow::Result<Self> {
         let seed = config.seed.max(1);
-        let rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+        let rng = rand::rngs::StdRng::seed_from_u64(seed);
         Ok(Self {
             config: config.clone(),
             pending: VecDeque::new(),
@@ -347,8 +350,6 @@ fn max_drawdown(equity_curve: &[f64]) -> f64 {
     }
     max_dd
 }
-
-/// Add the simulator crate to the workspace members.
 
 #[cfg(test)]
 mod tests {

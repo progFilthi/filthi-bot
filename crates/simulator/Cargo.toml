@@ -15,3 +15,19 @@ anyhow = "1"
 [[bin]]
 name = "xau-backtest"
 path = "src/bin/backtest.rs"
+
+[[bin]]
+name = "xau-analyze"
+path = "src/bin/analyze.rs"
+
+[[bin]]
+name = "xau-walkforward"
+path = "src/bin/walkforward.rs"
+
+[[bin]]
+name = "xau-validate"
+path = "src/bin/validate.rs"
+
+[[bin]]
+name = "xau-report"
+path = "src/bin/report.rs"
