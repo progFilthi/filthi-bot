@@ -57,6 +57,7 @@ xau-bot/
 │   ├── research/             # optimizer, walk-forward, Monte Carlo, reports
 │   ├── bridge/               # TCP server, protocol, reconnect logic
 │   ├── live/                 # live runner wiring strategy + risk + bridge
+│   ├── dashboard/            # read-only UI: SQLite history + SSE (axum)
 │   └── cli/                  # `xau backtest|optimize|wfa|mc|live|report`
 ├── mql5/Bridge.mq5           # the EA
 ├── configs/                  # TOML per strategy/run

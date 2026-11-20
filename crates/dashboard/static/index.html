@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D3 · XAUUSD</title>
+<style>
+  :root{
+    --bg:#0a0e13; --panel:#111821; --panel2:#0d141c; --line:#1e2836;
+    --text:#e6edf5; --dim:#7d8ea3; --green:#2ee6a8; --red:#ff5f6d;
+    --amber:#ffb24d; --blue:#5aa9ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .wrap{max-width:1440px;margin:0 auto;padding:14px}
+  header{display:flex;flex-wrap:wrap;gap:16px;align-items:center;
+         justify-content:space-between;padding:14px 18px;background:var(--panel);
+         border:1px solid var(--line);border-radius:12px}
+  .brand{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .brand b{font-size:17px;letter-spacing:.5px}
+  .brand span{color:var(--dim);font-size:12px}
+  .price{font-size:27px;font-weight:600;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+  .stats{display:flex;gap:20px;flex-wrap:wrap}
+  .stat{display:flex;flex-direction:column;gap:2px}
+  .stat label{color:var(--dim);font-size:10px;letter-spacing:.12em;text-transform:uppercase}
+  .stat b{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;
+        padding:4px 9px;border-radius:999px;border:1px solid var(--line);
+        background:var(--panel2);color:var(--dim)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+  .ok .dot{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .bad .dot{background:var(--red);box-shadow:0 0 8px var(--red)}
+  .ok{color:var(--green);border-color:#1c3f34}
+  .bad{color:var(--red);border-color:#432028}
+  .grid{display:grid;gap:12px;margin-top:12px;
+        grid-template-columns:minmax(0,1.85fr) minmax(0,1fr)}
+  @media (max-width:1020px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:13px 15px;min-width:0;display:flex;flex-direction:column}
+  .card h2{margin:0 0 9px;font-size:11px;letter-spacing:.14em;
+           text-transform:uppercase;color:var(--dim);font-weight:600;
+           display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+  th{text-align:right;color:var(--dim);font-weight:500;font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;padding:0 8px 7px}
+  th:first-child,td:first-child{text-align:left}
+  td{padding:8px;text-align:right;border-top:1px solid var(--line);
+     font-variant-numeric:tabular-nums}
+  td.read{white-space:normal;min-width:132px}
+  tbody tr:hover{background:#141d27}
+  .sig{display:inline-block;padding:2px 8px;border-radius:5px;font-size:11px;
+       font-weight:700;letter-spacing:.06em}
+  .sig.buy{background:rgba(46,230,168,.14);color:var(--green)}
+  .sig.sell{background:rgba(255,95,109,.14);color:var(--red)}
+  .tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;
+       border:1px solid var(--line);color:var(--dim);text-transform:uppercase;
+       letter-spacing:.08em}
+  .muted{color:var(--dim)}
+  .up{color:var(--green)} .down{color:var(--red)} .warn{color:var(--amber)}
+  .row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;
+       border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+  .row:first-child{border-top:0}
+  .row label{color:var(--dim)}
+  .empty{color:var(--dim);padding:14px 0;text-align:center}
+  #chart{width:100%;height:140px;display:block;flex:1;min-height:120px}
+  .feed{max-height:232px;overflow:auto}
+  .feed .item{display:flex;gap:9px;padding:6px 0;border-top:1px solid var(--line);
+              font-size:12px;align-items:baseline;flex-wrap:wrap}
+  .feed .item:first-child{border-top:0}
+  .feed .t{color:var(--dim);min-width:92px}
+  .feed .amt{margin-left:auto;font-variant-numeric:tabular-nums}
+  .note{color:var(--amber);font-size:11px;margin-top:8px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:8px}
+  .kpi{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+  .kpi label{display:block;color:var(--dim);font-size:9px;letter-spacing:.1em;
+             text-transform:uppercase;margin-bottom:3px}
+  .kpi b{font-size:14px;font-variant-numeric:tabular-nums}
+  .foot{margin:14px 0 6px;color:var(--dim);font-size:11px;text-align:center}
+
+  /* Dense tables need horizontal room; make the affordance obvious instead of
+     silently clipping the last column. */
+  @media (max-width:1020px){
+    .scroll{position:relative}
+    .scroll::after{content:"";position:absolute;top:0;right:0;bottom:0;width:22px;
+      pointer-events:none;background:linear-gradient(90deg,transparent,var(--panel))}
+  }
+
+  /* On a phone the scan becomes a list: timeframe, then label/value pairs. */
+  @media (max-width:720px){
+    .wrap{padding:10px}
+    header{padding:12px 14px;gap:12px}
+    .price{font-size:24px}
+    .scan-table thead{display:none}
+    #scan tbody,#scan tr,#scan td{display:block}
+    #scan tr{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));
+             gap:6px 8px;padding:10px 0;border-top:1px solid var(--line);width:100%}
+    #scan td{border:0;padding:0;text-align:left;white-space:nowrap;font-size:12.5px;
+             min-width:0}
+    .scroll{overflow:visible}
+    .scroll::after{display:none}
+    #scan td::before{content:attr(data-l);display:block;color:var(--dim);font-size:9px;
+                     letter-spacing:.1em;text-transform:uppercase;margin-bottom:1px}
+    #scan td.tf{grid-column:1/-1;font-size:15px}
+    #scan td.tf::before{display:none}
+    #scan td.closed{grid-column:1/5}
+    #scan td.close{grid-column:5/9;text-align:right}
+    #scan td.range{grid-column:1/-1}
+    #scan td.ema300{grid-column:1/4}
+    #scan td.atr{grid-column:4/6}
+    #scan td.next{grid-column:6/9;text-align:right}
+    #scan td.next::before{text-align:right}
+    #scan td.read{grid-column:1/-1;white-space:normal;margin-top:4px;display:flex;
+                  align-items:baseline;gap:8px;flex-wrap:wrap}
+    #scan td.read::before{display:none}
+    .card h2{flex-wrap:wrap}
+    .card h2>span:first-child{white-space:nowrap}
+    #chart{height:110px}
+    .feed .t{min-width:78px}
+    .kpis{grid-template-columns:repeat(auto-fit,minmax(78px,1fr))}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <b>D3</b><span>XAUUSD · Donchian 55 · EMA300 · trail 2.5 ATR</span>
+    </div>
+    <div class="price" id="price">—</div>
+    <div class="stats">
+      <div class="stat"><label>Equity</label><b id="equity">—</b></div>
+      <div class="stat"><label>Balance</label><b id="balance">—</b></div>
+      <div class="stat"><label>Floating</label><b id="floating">—</b></div>
+      <div class="stat"><label>Realised</label><b id="realised">—</b></div>
+      <div class="stat"><label>Free margin</label><b id="free">—</b></div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <span class="pill" id="conn"><i class="dot"></i><span>terminal</span></span>
+      <span class="pill" id="auto"><i class="dot"></i><span>autotrade</span></span>
+      <span class="pill" id="acct"><i class="dot" style="display:none"></i><span>—</span></span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <h2><span>Entry scan</span><span class="muted" id="scan-age"></span></h2>
+      <div class="scroll">
+        <table class="scan-table">
+          <thead><tr>
+            <th>TF</th><th>Last closed</th><th>Close</th><th>55 range</th>
+            <th>EMA300</th><th>ATR</th><th>Next bar</th><th>Read</th>
+          </tr></thead>
+          <tbody id="scan"><tr><td colspan="8" class="empty">waiting for terminal…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2><span>Open positions</span><span class="muted" id="pos-count"></span></h2>
+      <div id="positions"><div class="empty">flat</div></div>
+
+      <h2 style="margin-top:16px">Runners</h2>
+      <div id="tracks"></div>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2><span>Equity</span><span class="muted" id="eq-range"></span></h2>
+      <svg id="chart" viewBox="0 0 600 140" preserveAspectRatio="none"></svg>
+    </section>
+
+    <section class="card">
+      <h2><span>Performance</span><span class="muted" id="perf-src">closed trades</span></h2>
+      <div class="kpis">
+        <div class="kpi"><label>Strategy P&L</label><b id="k-strat">—</b></div>
+        <div class="kpi"><label>Trades</label><b id="k-deals">—</b></div>
+        <div class="kpi"><label>Win rate</label><b id="k-win">—</b></div>
+        <div class="kpi"><label>Avg win</label><b id="k-aw">—</b></div>
+        <div class="kpi"><label>Avg loss</label><b id="k-al">—</b></div>
+        <div class="kpi"><label>Manual P&L</label><b id="k-man">—</b></div>
+      </div>
+      <div class="note" id="perf-note"></div>
+      <div style="margin-top:10px">
+        <div class="row"><label>All realised (incl. manual + tests)</label><span id="p-net">—</span></div>
+        <div class="row"><label>Test / experiment trades</label><span id="p-test">—</span></div>
+        <div class="row"><label>Best / worst trade</label><span id="p-bw">—</span></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2><span>Closed trades</span><span class="muted">strategy tagged <b>D3</b></span></h2>
+      <div class="feed" id="deals"><div class="empty">no closed trades</div></div>
+    </section>
+    <section class="card">
+      <h2><span>Signal history</span><span class="muted">from SQLite</span></h2>
+      <div class="feed" id="feed"><div class="empty">no signals recorded yet</div></div>
+    </section>
+  </div>
+
+  <div class="foot">read-only · no orders are placed from this page</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const money = v => (v == null || !isFinite(v)) ? "—" :
+  (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const num = (v,d=2) => (v == null || !isFinite(v)) ? "—" : v.toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+const pct = v => (v == null || !isFinite(v)) ? "—" : v.toFixed(1) + "%";
+const mmss = s => { if (s == null || s < 0) return "—";
+  const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = Math.floor(s%60);
+  return h ? `${h}h ${String(m).padStart(2,"0")}m` : `${m}m ${String(x).padStart(2,"0")}s`; };
+// bar stamps are broker-clock labels, shown exactly as the terminal prints them
+const barTime = t => { if (!t) return "—";
+  const d = new Date(t*1000);
+  return d.toISOString().slice(5,16).replace("T"," "); };
+const clock = s => !s ? "—" : s.replace("T"," ").replace("Z"," UTC");
+const sign = v => v > 0 ? "up" : v < 0 ? "down" : "";
+
+function kpi(id, v, colour){
+  const el = $(id); el.textContent = v;
+  el.className = colour || "";
+}
+
+function render(s){
+  const acct = s.account || {};
+  $("price").textContent = s.price ? num(s.price) : "—";
+  $("equity").textContent = money(acct.equity);
+  $("balance").textContent = money(acct.balance);
+  const floating = (acct.equity != null && acct.balance != null) ? acct.equity - acct.balance : null;
+  $("floating").textContent = money(floating);
+  $("floating").className = sign(floating);
+  $("free").textContent = money(acct.margin_free);
+  const perf = s.perf || {};
+  $("realised").textContent = money(perf.net);
+  $("realised").className = sign(perf.net);
+
+  $("conn").className = "pill " + (s.connected ? "ok" : "bad");
+  $("auto").className = "pill " + (s.autotrade ? "ok" : "bad");
+  $("acct").className = "pill";
+  $("acct").querySelector("span").textContent =
+    [acct.kind, acct.login, acct.currency].filter(Boolean).join(" · ") || "—";
+
+  // --- entry scan ---
+  const rows = s.analyses || [];
+  $("scan").innerHTML = rows.length ? rows.map(a => {
+    const read = a.side
+      ? `<span class="sig ${a.side}">${a.side.toUpperCase()}</span>
+         <span class="muted">stop ${num(a.stop)} · risk ${money(a.risk_per_lot*0.1)}</span>`
+      : `<span class="muted"><span class="up">buy +${num(a.to_buy)}</span> · <span class="down">sell -${num(a.to_sell)}</span></span>`;
+    return `<tr>
+      <td class="tf" data-l="TF"><b>${a.period}</b></td>
+      <td class="muted closed" data-l="closed">${barTime(a.bar_ts)}</td>
+      <td data-l="close">${num(a.close)}</td>
+      <td class="range muted" data-l="55 range">${num(a.lo)} – ${num(a.hi)}</td>
+      <td class="muted ema300" data-l="ema300">${num(a.ema)} <span class="${a.uptrend?'up':'down'}">${a.uptrend?"↑":"↓"}</span></td>
+      <td class="atr" data-l="atr">${num(a.atr)}</td>
+      <td class="muted next" data-l="next">${mmss(a.next_close_in)}</td>
+      <td class="read" data-l="read">${read}</td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="8" class="empty">no scan yet</td></tr>`;
+
+  // --- positions ---
+  const pos = s.positions || [];
+  $("pos-count").textContent = pos.length ? `${pos.length} open` : "";
+  $("positions").innerHTML = pos.length ? pos.map(p => `
+    <div class="row"><label>${p.side.toUpperCase()} ${p.lots} lot · <span class="tag">${p.kind}</span></label>
+      <b class="${sign(p.profit)}">${money(p.profit)}</b></div>
+    <div class="row"><label>Entry</label><span>${num(p.entry)}</span></div>
+    <div class="row"><label>Stop</label><span>${p.sl ? num(p.sl) + " · risk " + money(p.risk_usd) : '<span class="warn">none</span>'}</span></div>
+    <div class="row"><label>Target</label><span>${p.tp ? num(p.tp) : '<span class="muted">none (trail)</span>'}</span></div>
+  `).join("") : `<div class="empty">flat</div>`;
+
+  // --- runners ---
+  $("tracks").innerHTML = (s.tracks || []).map(t => `
+    <div class="row">
+      <label>${t.period} <span class="${t.alive?"up":"warn"}">${t.alive?"running":"stopped"}</span></label>
+      <span class="muted">${t.open_position ? "position " + t.open_position : "flat"} · ${t.closed_trades} closed</span>
+    </div>`).join("") || `<div class="empty">no runners</div>`;
+
+  // --- performance ---
+  kpi("k-strat", money(perf.strategy_net), sign(perf.strategy_net));
+  kpi("k-deals", perf.strategy_deals != null ? perf.strategy_deals : "—");
+  kpi("k-win", pct(perf.strategy_win_rate));
+  kpi("k-aw", money(perf.strategy_avg_win), "up");
+  kpi("k-al", money(perf.strategy_avg_loss), "down");
+  kpi("k-man", money(perf.manual_net), sign(perf.manual_net));
+  $("p-net").textContent = money(perf.net);
+  $("p-net").className = sign(perf.net);
+  $("p-test").textContent = money(perf.test_net);
+  $("p-bw").innerHTML = `<span class="up">${money(perf.best)}</span> / <span class="down">${money(perf.worst)}</span>`;
+  $("perf-src").textContent = perf.deals ? `${perf.deals} closed · ${perf.win_rate.toFixed(1)}% all` : "closed trades";
+  $("perf-note").textContent = (perf.strategy_deals > 0 && perf.strategy_deals < 20)
+    ? `only ${perf.strategy_deals} strategy trade${perf.strategy_deals === 1 ? "" : "s"} — too few to judge yet`
+    : "";
+
+  // --- closed trades ---
+  const ds = s.deals || [];
+  $("deals").innerHTML = ds.length ? ds.map(d => `
+    <div class="item">
+      <span class="t">${(d.closed||"").slice(5,16).replace("T"," ")}</span>
+      <span class="sig ${d.side}">${d.side.toUpperCase()}</span>
+      <span class="tag">${d.kind}</span>
+      <span class="muted">${d.lots}</span>
+      <span class="muted">${num(d.entry)} → ${num(d.exit)}</span>
+      <span class="amt ${sign(d.profit)}">${money(d.profit)}</span>
+    </div>`).join("") : `<div class="empty">no closed trades</div>`;
+
+  if (s.error) {
+    $("scan-age").textContent = "terminal error";
+    $("scan-age").className = "down";
+    $("scan-age").title = s.error;
+  } else {
+    $("scan-age").textContent = `updated ${new Date(s.ts*1000).toLocaleTimeString()} · ${clock(s.server_time)}`;
+    $("scan-age").className = "muted";
+  }
+}
+
+async function loadHistory(){
+  try{
+    const h = await (await fetch("/api/history")).json();
+    drawChart(h.equity || []);
+    drawFeed(h.signals || []);
+  }catch(e){ /* keep the last good chart */ }
+}
+
+function drawChart(points){
+  const svg = $("chart");
+  if (!points.length){
+    svg.innerHTML = `<text x="300" y="70" fill="#7d8ea3" font-size="12" text-anchor="middle">no equity history yet</text>`;
+    return;
+  }
+  const W = 600, H = 140, pad = 6;
+  const es = points.map(p => p.e);
+  const rawLo = Math.min(...es), rawHi = Math.max(...es);
+  const flat = rawHi - rawLo < 0.005;
+  let lo = rawLo, hi = rawHi;
+  if (flat){ lo = rawLo - 1; hi = rawHi + 1; }
+  const x = i => pad + (W - 2*pad) * (points.length === 1 ? 1 : i/(points.length-1));
+  const y = v => H - pad - (H - 2*pad) * ((v - lo)/(hi - lo));
+  const line = points.map((p,i) => `${i?"L":"M"}${x(i).toFixed(1)},${y(p.e).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(points.length-1).toFixed(1)},${H-pad} L${pad},${H-pad} Z`;
+  const first = points[0].e, lastV = points[points.length-1].e;
+  const colour = flat ? "#7d8ea3" : (lastV >= first ? "#2ee6a8" : "#ff5f6d");
+  svg.innerHTML = `
+    ${flat ? "" : `<defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="${colour}" stop-opacity=".22"/>
+      <stop offset="100%" stop-color="${colour}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <path d="${area}" fill="url(#g)"/>`}
+    <path d="${line}" fill="none" stroke="${colour}" stroke-width="${flat ? 1.1 : 1.6}"/>
+    <text x="${pad}" y="12" fill="#7d8ea3" font-size="10">${money(rawHi)}</text>
+    <text x="${pad}" y="${H-3}" fill="#7d8ea3" font-size="10">${money(rawLo)}</text>
+    ${flat ? `<text x="${W-pad}" y="12" fill="#7d8ea3" font-size="10" text-anchor="end">no change yet</text>` : ""}`;
+  $("eq-range").textContent = flat
+    ? `${points.length} pts · flat at ${money(lastV)}`
+    : `${points.length} pts · ${money(first)} → ${money(lastV)}`;
+}
+
+function drawFeed(signals){
+  const feed = $("feed");
+  if (!signals.length){ feed.innerHTML = `<div class="empty">no signals recorded yet</div>`; return; }
+  feed.innerHTML = signals.map(s => `
+    <div class="item">
+      <span class="t">${barTime(s.bar_ts)}</span>
+      <span class="sig ${s.side}">${s.side.toUpperCase()}</span>
+      <span>${s.period}</span>
+      <span class="muted">@ ${num(s.close)}</span>
+      <span class="muted">stop ${num(s.stop)}</span>
+    </div>`).join("");
+}
+
+const es = new EventSource("/api/stream");
+es.addEventListener("snapshot", e => { try{ render(JSON.parse(e.data)); }catch(_){} });
+es.onerror = () => { $("conn").className = "pill bad"; };
+
+loadHistory();
+setInterval(loadHistory, 30000);
+</script>
+</body>
+</html>

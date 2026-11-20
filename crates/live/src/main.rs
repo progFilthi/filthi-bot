@@ -15,7 +15,8 @@
 //! only time comparison is "has this bar closed?", and both sides of that
 //! comparison come from the same server clock.
 
-mod mcp;
+use xau_live::market::*;
+use xau_live::mcp::Mcp;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -24,24 +25,13 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::{NaiveDateTime, Utc};
+use chrono::Utc;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use mcp::Mcp;
 use xau_core::{Bar, Side};
 use xau_sim::strategy::{atr, donchian, ema, entry_signals, StratKind, StratParams};
-
-// --- D3, the validated configuration (configs/phase0.toml [strategy]) -------
-const LOOKBACK: usize = 55;
-const TREND_MA: usize = 300;
-const ATR_PERIOD: usize = 14;
-const SL_ATR: f64 = 1.5;
-const TRAIL_ATR: f64 = 2.5;
-const MAX_HOLD_BARS: usize = 240;
-const SYMBOL: &str = "XAUUSD";
-const CONTRACT: f64 = 100.0;
 
 #[derive(Parser, Debug)]
 #[command(name = "xau-live", version, about = "D3 live runner over MT5 MCP")]
@@ -86,19 +76,6 @@ struct Args {
     state: Option<PathBuf>,
     #[arg(long)]
     log: Option<PathBuf>,
-}
-
-fn period_secs(p: &str) -> Result<i64> {
-    Ok(match p {
-        "M1" => 60,
-        "M5" => 300,
-        "M15" => 900,
-        "M30" => 1800,
-        "H1" => 3600,
-        "H4" => 14400,
-        "D1" => 86400,
-        other => bail!("unsupported period {other}"),
-    })
 }
 
 // --- state ------------------------------------------------------------------
@@ -176,92 +153,6 @@ impl Ctx {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
-    }
-}
-
-// --- terminal reads ---------------------------------------------------------
-fn as_f64(v: &Value) -> f64 {
-    v.as_f64()
-        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        .unwrap_or(f64::NAN)
-}
-
-fn parse_naive(s: &str) -> Result<NaiveDateTime> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-        .with_context(|| format!("bad timestamp {s:?}"))
-}
-
-fn server_now(m: &mut Mcp) -> Result<NaiveDateTime> {
-    let t = m.call("get_time_information", json!({}))?;
-    let s = t
-        .get("trade_server_last_known_time")
-        .and_then(Value::as_str)
-        .context("no trade_server_last_known_time")?;
-    parse_naive(s)
-}
-
-fn bars(m: &mut Mcp, period: &str, count: usize) -> Result<Vec<Bar>> {
-    let per = period_secs(period)?;
-    let now = server_now(m)?;
-    let span_days = (count as f64 * per as f64 / 84_600.0 * 2.2).ceil() as i64 + 10;
-    let from = now - chrono::Duration::days(span_days);
-    let to = now + chrono::Duration::days(1);
-
-    let page = m.call(
-        "get_chart_history",
-        json!({
-            "symbol": SYMBOL,
-            "period": period,
-            "datetime_from": from.format("%Y-%m-%dT%H:%M:%S").to_string(),
-            "datetime_to": to.format("%Y-%m-%dT%H:%M:%S").to_string(),
-            "limit": 100_000
-        }),
-    )?;
-    let hist = page
-        .get("history")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let tail = if hist.len() > count { &hist[hist.len() - count..] } else { &hist[..] };
-
-    let mut out = Vec::with_capacity(tail.len());
-    for b in tail {
-        let ts = parse_naive(b.get("time").and_then(Value::as_str).context("bar without time")?)
-            .map(|d| d.and_utc().timestamp())
-            .unwrap_or(0);
-        out.push(Bar {
-            ts,
-            open: as_f64(&b["open"]),
-            high: as_f64(&b["high"]),
-            low: as_f64(&b["low"]),
-            close: as_f64(&b["close"]),
-            volume: b.get("tick_volume").and_then(Value::as_u64).unwrap_or(0),
-            spread_pts: b.get("spread").and_then(Value::as_i64).unwrap_or(0),
-            spread_max: b.get("spread").and_then(Value::as_i64).unwrap_or(0),
-        });
-    }
-    Ok(out)
-}
-
-fn last_price(m: &mut Mcp) -> Result<f64> {
-    let b = bars(m, "M1", 2)?;
-    b.last().map(|b| b.close).context("no M1 bars")
-}
-
-fn account(m: &mut Mcp) -> Result<Value> {
-    m.call("get_trading_account_info", json!({}))
-}
-
-fn positions(m: &mut Mcp) -> Result<Vec<Value>> {
-    let v = m.call("get_trading_open_positions", json!({}))?;
-    Ok(v.get("positions").and_then(Value::as_array).cloned().unwrap_or_default())
-}
-
-fn field<'a>(p: &'a Value, k: &str) -> String {
-    match &p[k] {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
     }
 }
 
@@ -621,10 +512,6 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
     state.last_bar_ts = bar.ts;
     ctx.save(state)?;
     Ok(true)
-}
-
-fn round2(x: f64) -> f64 {
-    (x * 100.0).round() / 100.0
 }
 
 /// The terminal rotates its bearer token on every restart, so the token lives

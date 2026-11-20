@@ -618,13 +618,91 @@ percentage is the wrong dial; profit factor and drawdown are the right ones.
 the live parameter on that basis is exactly the overfitting this project has
 avoided so far. It needs walk-forward validation before it is worth anything.
 
-## 13. Bottom line
+## 13. The dashboard — `xau-dashboard`
+
+A read-only view of everything the bot is doing: account, open positions, the
+entry scan across four timeframes, realised performance, and a persistent
+signal log. It never places, modifies or cancels an order.
+
+Run it next to the runner:
+
+```bash
+cargo run -p xau-dashboard          # http://127.0.0.1:8787
+XAU_DASH_PORT=9000 cargo run -p xau-dashboard   # different port
+```
+
+### Why SQLite and not Redis
+
+The question was whether we need a DB at all, or whether Redis is the right
+choice for realtime because "we don't need stale data". Measured answer:
+
+* The system produces **~6 bar closes a day** on H4 and one signal at a time.
+* There is exactly **one writer** (the poller) and **one reader** (the browser).
+* A snapshot is a few kilobytes; the whole history is a few hundred rows a day.
+
+Redis would add a **daemon to install, run and monitor**, a wire protocol, a
+second serialisation format and an eviction policy — to solve a fan-out problem
+this system does not have. "No stale data" is not a database property anyway:
+freshness comes from *how often you poll*, not from where you store the result.
+The dashboard polls the terminal every 3s and the scan every 15s regardless.
+
+SQLite gives durable history in **one file with no service to run**, and realtime
+delivery is an **in-process broadcast channel** pushed to the browser over SSE —
+which is exactly what Redis pub/sub would be emulating. If a second consumer
+ever appears (another machine, a phone app, alerts), that is the moment to add
+Redis or a small HTTP fan-out, not before.
+
+### What the page shows
+
+| Panel | Content |
+| --- | --- |
+| Header | live price, equity, balance, floating, realised P&L, free margin, terminal + autotrade state |
+| Entry scan | per timeframe: last closed bar, close, 55-bar range, EMA300 (with trend arrow), ATR, time to next bar close, and the read — either **BUY/SELL + stop + risk at 0.10 lot**, or how far price must move to trigger each side |
+| Open positions | side, lots, entry, stop, risk in dollars, target (none — the trail manages it) |
+| Runners | whether the H1/H4 process is actually alive, its position and closed count |
+| Equity | stored equity curve (flat periods are drawn as a line, not a block) |
+| Performance | strategy P&L, trades, win rate, average win/loss, manual P&L, all-realised, test trades, best/worst |
+| Closed trades | every closed trade with its attribution tag |
+| Signal history | every signal the scanner has ever seen, from SQLite |
+
+### Attribution is deliberate
+
+Realised P&L is split by the trade's tag, never lumped together:
+
+* `strategy` — comment is exactly `D3-H1` or `D3-H4`, i.e. the bot opened it.
+* `manual` — empty comment, i.e. opened by hand from the phone.
+* `test` — everything else (`lot0.1-*`, `xau-bridge-*`, `D3-smoke`).
+
+The current split on the demo account is **strategy −$86.40**, **manual
++$1,836.56**, **test −$35.46**. Reporting the manual win as bot performance
+would be a lie, so the UI separates them and says "too few trades to judge"
+until there are at least 20 strategy trades.
+
+One caveat recorded here on purpose: the −$96.50 strategy-tagged trade was
+placed outside a validated signal, so even the "strategy" line is not pure.
+
+### Honesty in the plumbing
+
+* **Runner liveness** is a process check (`pgrep`), not a log-file timestamp.
+  The runner only writes when something happens, so a healthy idle runner
+  looked dead for up to a full bar.
+* **A dead runner's state file is a fossil.** Its position ID is not shown.
+* **Missing fields never hide risk.** A position with no `symbol` is still
+  counted; only a positive mismatch (`EURUSD`) is filtered out.
+* **Token rotation** is handled: the terminal issues a new bearer token on
+  restart, so every reconnection re-reads `runs/live/mcp_token`.
+* **Drawdown points are bucketed to one minute** and pruned after 30 days, so
+  the file stays small without losing the shape of the curve.
+* `/healthz` returns 503 when the terminal is unreachable while the page keeps
+  serving, so a dead terminal degrades the data, not the UI.
+
+## 14. Bottom line
 
 | Question | Answer |
 | --- | --- |
 | Does the strategy have a measured edge? | **Yes** — 17 years, 14/17 positive, mean +0.12R/trade, both sides, survives 3× spread |
 | Is the edge concentrated in 2025-26? | **Less than it looks** — in R terms 2013 was the best year |
-| Is the bot mechanically ready? | **Yes** — MCP entry/SL/modify/close all verified on the demo account, 38 tests green |
+| Is the bot mechanically ready? | **Yes** — MCP entry/SL/modify/close verified on demo, dashboard live, 43 tests green |
 | Is it ready for demo? | **Yes — start it** |
 | Is it ready for live? | **Not yet** — demo checklist, gap data, volatility sizing, Algo Trading fix |
 | What should we expect? | ~$1,470/yr at fixed 0.10 lot; lumpy, with multi-year flat periods |
