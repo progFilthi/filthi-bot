@@ -47,3 +47,7 @@ path = "src/bin/resample.rs"
 [[bin]]
 name = "xau-tpsweep"
 path = "src/bin/tpsweep.rs"
+
+[[bin]]
+name = "xau-winsweep"
+path = "src/bin/winsweep.rs"

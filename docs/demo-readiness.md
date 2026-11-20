@@ -578,6 +578,46 @@ risk, 2.02% of equity) and is managed by `xau-live --period H4`. It is a
 *separate track* from the H1 demo record and is labelled as such (`D3-H4`), so
 it cannot be mistaken for evidence about the headline H1 strategy.
 
+### 12.3 Can we be right more often?
+
+Asked directly: how do we raise the win rate? `xau-winsweep` tests the only
+entry-side lever that could plausibly do it — a longer breakout window, which
+makes each signal rarer and stronger.
+
+**H1, lookback sweep (EMA300 gate, everything else unchanged):**
+
+| Lookback | Trades | Win% | PF | Expectancy | PnL | Max DD |
+| --- | --- | --- | --- | --- | --- | --- |
+| 20 | 2,807 | 35.4 | 1.25 | $10.59 | +$29,731 | 12.43% |
+| 40 | 2,160 | 35.7 | 1.28 | $12.15 | +$26,240 | 11.24% |
+| **55 (live)** | **1,911** | **36.1** | **1.32** | **$13.94** | **+$26,647** | **9.90%** |
+| 90 | 1,580 | 36.3 | 1.46 | $18.39 | +$29,059 | 8.45% |
+| 120 | 1,400 | 36.7 | 1.49 | $19.84 | +$27,769 | 7.11% |
+| 150 | 1,279 | 37.1 | 1.43 | $17.95 | +$22,958 | 6.58% |
+
+**The win rate barely moves: 35.4% → 37.1% while the window more than
+quintuples.** Accuracy is not available from the entry rule. What a longer
+window does buy is profit factor and a smaller drawdown (1.32 → 1.49, 9.9% →
+7.1%) at the cost of 27% fewer trades and a slightly lower total PnL. H4 shows
+the same pattern more strongly: win rate 40.4% → 44.1%, PF 1.81 → 2.00 at
+lookback 120, max DD 6.24%.
+
+**Trend gate sweep (H1, lookback 55):** removing the EMA filter leaves the win
+rate almost unchanged (35.4% vs 36.1%) but nearly *doubles* the drawdown
+(17.01% vs 9.90%) and cuts PF to 1.24. EMA300 is doing real work, and it is
+doing it on payoff, not on accuracy.
+
+**Why this matters:** the two ways to raise the win rate are (a) cap winners
+with a take profit — measured, −69% PnL and triple the drawdown — or (b) buy
+accuracy by accepting a worse payoff, which is what high-win-rate mean
+reversion does and why it blows up on rare losses. Break-even at the current
+payoff is 29.9%; the system is at 36.1% and makes money. Optimising the
+percentage is the wrong dial; profit factor and drawdown are the right ones.
+
+**Not yet a recommendation:** lookback 90-120 looks better *in-sample*. Changing
+the live parameter on that basis is exactly the overfitting this project has
+avoided so far. It needs walk-forward validation before it is worth anything.
+
 ## 13. Bottom line
 
 | Question | Answer |
