@@ -16,13 +16,26 @@ import http.client
 import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 22346
 PATH = "/mcp"
-TOKEN = os.environ.get(
-    "MT5_MCP_TOKEN", "oo6totlCD01Iu//GWbs0E/0qqP28lE+8TGkXB/WXYL"
-)
+
+
+def _token() -> str:
+    """Bearer token. The terminal rotates it on every restart, so it lives in a
+    gitignored file rather than in source; an env var wins if set."""
+    tok = os.environ.get("MT5_MCP_TOKEN", "").strip()
+    if tok:
+        return tok
+    path = Path(__file__).resolve().parents[2] / "runs" / "live" / "mcp_token"
+    if path.exists():
+        return path.read_text().strip()
+    return ""
+
+
+TOKEN = _token()
 
 PERIOD_MINUTES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30,
@@ -59,6 +72,11 @@ class Mcp:
     def __init__(self, timeout: int = 60) -> None:
         self.timeout = timeout
         self.sid: str | None = None
+        if not TOKEN:
+            raise McpError(
+                "no MCP token: set MT5_MCP_TOKEN or write it to runs/live/mcp_token "
+                "(the terminal rotates it on restart)"
+            )
         self._initialize()
 
     # -- plumbing ---------------------------------------------------------

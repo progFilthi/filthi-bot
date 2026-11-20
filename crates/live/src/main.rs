@@ -75,8 +75,12 @@ struct Args {
     max_drawdown_pct: f64,
     #[arg(long, default_value = "http://127.0.0.1:22346/mcp")]
     url: String,
-    #[arg(long, env = "MT5_MCP_TOKEN", default_value = "oo6totlCD01Iu//GWbs0E/0qqP28lE+8TGkXB/WXYL")]
+    /// Bearer token. Defaults to $MT5_MCP_TOKEN, then the token file.
+    #[arg(long, env = "MT5_MCP_TOKEN", default_value = "")]
     token: String,
+    /// File holding the token. The terminal rotates it on every restart.
+    #[arg(long)]
+    token_file: Option<PathBuf>,
     /// State file. Defaults to runs/live/rust_<period>_state.json.
     #[arg(long)]
     state: Option<PathBuf>,
@@ -86,6 +90,7 @@ struct Args {
 
 fn period_secs(p: &str) -> Result<i64> {
     Ok(match p {
+        "M1" => 60,
         "M5" => 300,
         "M15" => 900,
         "M30" => 1800,
@@ -136,6 +141,7 @@ struct Ctx {
     dry_run: bool,
     max_drawdown_pct: f64,
     adopt_any: bool,
+    manual_sig: Option<String>,
 }
 
 impl Ctx {
@@ -356,10 +362,21 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
     }
 
     // ---- reconcile with the broker ----------------------------------------
+    // Two tracks (H1, H4) may run at once, so nothing here may assume the
+    // account holds exactly one position, or that the position it can see is
+    // ours. Ownership is the `D3-<PERIOD>` comment.
     let live = positions(&mut ctx.mcp)?;
+    let on_symbol: Vec<Value> = live
+        .into_iter()
+        .filter(|l| field(l, "symbol") == SYMBOL)
+        .collect();
+    let my_tag = format!("D3-{}", ctx.period);
+    // Exact match, not a prefix: "D3-M1" must never claim an "D3-M15" trade.
+    let tagged = |l: &Value, tag: &str| field(l, "comment").trim() == tag;
+
     let mut fresh_adopt = false;
     if let Some(p) = state.position.clone() {
-        if !live.iter().any(|l| field(l, "position_id") == p.position_id) {
+        if !on_symbol.iter().any(|l| field(l, "position_id") == p.position_id) {
             ctx.log(
                 "closed_by_broker",
                 &[("side", json!(p.side)), ("entry", json!(p.entry)),
@@ -371,21 +388,14 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
         }
     }
     if state.position.is_none() {
-        if let Some(l) = live.first() {
-            // A position opened on H1 must not be trailed with H4 volatility
-            // (or the reverse). The comment names the timeframe it belongs to.
+        let mine: Option<&Value> = on_symbol.iter().find(|l| tagged(l, &my_tag));
+        let adoptable = match mine {
+            Some(l) => Some(l),
+            None if ctx.adopt_any => on_symbol.first(),
+            None => None,
+        };
+        if let Some(l) = adoptable {
             let comment = field(l, "comment");
-            if let Some(owner) = comment.strip_prefix("D3-") {
-                if !owner.is_empty() && owner != ctx.period && !ctx.adopt_any {
-                    bail!(
-                        "open position {} is commented {comment:?}, which belongs to {owner}, \
-                         but this runner is {}. Refusing to manage it on the wrong timeframe \
-                         (pass --adopt-any to override).",
-                        field(l, "position_id"),
-                        ctx.period
-                    );
-                }
-            }
             let adopted = Pos {
                 position_id: field(l, "position_id"),
                 side: field(l, "action"),
@@ -398,9 +408,44 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
             };
             ctx.log("adopted_position",
                 &[("side", json!(adopted.side)), ("entry", json!(adopted.entry)),
-                  ("id", json!(adopted.position_id))]);
+                  ("id", json!(adopted.position_id)), ("comment", json!(comment))]);
             state.position = Some(adopted);
             fresh_adopt = true;
+        } else {
+            // Positions belonging to other tracks are none of our business.
+            let foreign: Vec<String> = on_symbol
+                .iter()
+                .map(|l| field(l, "comment"))
+                .filter(|c| c.starts_with("D3-"))
+                .collect();
+            if !foreign.is_empty() {
+                ctx.log("ignoring_other_tracks", &[("comments", json!(foreign))]);
+            }
+            // An untagged XAUUSD position is not ours: it was opened by hand or
+            // by something else, so it is left completely alone. Logged loudly
+            // because it changes the account's real exposure.
+            let manual: Vec<(String, String, f64)> = on_symbol
+                .iter()
+                .filter(|l| !field(l, "comment").trim().starts_with("D3-"))
+                .map(|l| (field(l, "position_id"), field(l, "action"), as_f64(&l["volume"])))
+                .collect();
+            if !manual.is_empty() {
+                let sig = manual
+                    .iter()
+                    .map(|m| format!("{}:{}:{}", m.0, m.1, m.2))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if ctx.manual_sig.as_deref() != Some(sig.as_str()) {
+                    ctx.log(
+                        "manual_position_present",
+                        &[("positions", json!(manual)),
+                          ("note", json!("not ours; left untouched, but it does change account risk"))],
+                    );
+                    ctx.manual_sig = Some(sig);
+                }
+            } else {
+                ctx.manual_sig = None;
+            }
             ctx.save(state)?;
         }
     }
@@ -454,13 +499,11 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
         if p.bars_held >= MAX_HOLD_BARS {
             ctx.log("time_exit", &[("side", json!(p.side)), ("bars", json!(p.bars_held))]);
             if !ctx.dry_run {
-                if let Some(l) = positions(&mut ctx.mcp)?.first() {
-                    let r = ctx.mcp.call(
-                        "trade_close_single_position",
-                        json!({ "symbol": SYMBOL, "position_ticket": field(l, "position_id") }),
-                    )?;
-                    ctx.log("time_exit_filled", &[("retcode", r["retcode"].clone())]);
-                }
+                let r = ctx.mcp.call(
+                    "trade_close_single_position",
+                    json!({ "symbol": SYMBOL, "position_ticket": p.position_id }),
+                )?;
+                ctx.log("time_exit_filled", &[("retcode", r["retcode"].clone())]);
             }
             state.position = None;
             state.closed_trades += 1;
@@ -490,17 +533,15 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
                       ("bars", json!(p.bars_held))],
                 );
                 if !ctx.dry_run {
-                    if let Some(l) = positions(&mut ctx.mcp)?.first() {
-                        let r = ctx.mcp.call(
-                            "trade_modify_sl_tp",
-                            json!({
-                                "symbol": SYMBOL,
-                                "position_ticket": field(l, "position_id"),
-                                "sl": cand_r
-                            }),
-                        )?;
-                        ctx.log("trail_filled", &[("retcode", r["retcode"].clone())]);
-                    }
+                    let r = ctx.mcp.call(
+                        "trade_modify_sl_tp",
+                        json!({
+                            "symbol": SYMBOL,
+                            "position_ticket": p.position_id,
+                            "sl": cand_r
+                        }),
+                    )?;
+                    ctx.log("trail_filled", &[("retcode", r["retcode"].clone())]);
                 }
                 p.sl = cand_r;
                 p.trailed = true;
@@ -553,7 +594,13 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
                     "entry_filled",
                     &[("retcode", r["retcode"].clone()), ("price", r["price"].clone())],
                 );
-                if let Some(l) = positions(&mut ctx.mcp)?.first() {
+                // Find the trade *we* just opened, by its tag — never assume it
+                // is the first position (a manual trade may be open too).
+                let after = positions(&mut ctx.mcp)?;
+                if let Some(l) = after
+                    .iter()
+                    .find(|l| field(l, "comment").trim() == my_tag)
+                {
                     state.position = Some(Pos {
                         position_id: field(l, "position_id"),
                         side: field(l, "action"),
@@ -580,11 +627,35 @@ fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
+/// The terminal rotates its bearer token on every restart, so the token lives
+/// in a gitignored file rather than in source. Env var wins if set.
+fn resolve_token(args: &Args, root: &std::path::Path) -> Result<String> {
+    if !args.token.trim().is_empty() {
+        return Ok(args.token.trim().to_string());
+    }
+    let path = args
+        .token_file
+        .clone()
+        .unwrap_or_else(|| root.join("runs/live/mcp_token"));
+    let raw = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "no MCP token: set MT5_MCP_TOKEN or write the token to {}",
+            path.display()
+        )
+    })?;
+    let token = raw.trim().to_string();
+    if token.is_empty() {
+        bail!("token file {} is empty", path.display());
+    }
+    Ok(token)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let bar_secs = period_secs(&args.period)?;
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let token = resolve_token(&args, &root)?;
     let state_path = args
         .state
         .unwrap_or_else(|| root.join(format!("runs/live/rust_{}_state.json", args.period.to_lowercase())));
@@ -593,7 +664,7 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| root.join(format!("runs/live/rust_{}_runner.log", args.period.to_lowercase())));
 
     let mut ctx = Ctx {
-        mcp: Mcp::connect(&args.url, &args.token)?,
+        mcp: Mcp::connect(&args.url, &token)?,
         state_path,
         log_path,
         period: args.period.clone(),
@@ -602,6 +673,7 @@ fn main() -> Result<()> {
         dry_run: args.dry_run,
         max_drawdown_pct: args.max_drawdown_pct,
         adopt_any: args.adopt_any,
+        manual_sig: None,
     };
 
     let mut state = ctx.load();
@@ -633,7 +705,7 @@ fn main() -> Result<()> {
                     return Err(e);
                 }
                 // Reconnect: the terminal drops idle sessions on restart.
-                match Mcp::connect(&args.url, &args.token) {
+                match Mcp::connect(&args.url, &token) {
                     Ok(m) => ctx.mcp = m,
                     Err(e2) => ctx.log("reconnect_failed", &[("error", json!(format!("{e2:#}"))) ]),
                 }

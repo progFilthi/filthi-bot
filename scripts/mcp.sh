@@ -3,7 +3,14 @@
 # Usage: scripts/mcp.sh call <tool> [json-args]
 set -euo pipefail
 
-TOKEN='oo6totlCD01Iu//GWbs0E/0qqP28lE+8TGkXB/WXYL'
+TOKEN="${MT5_MCP_TOKEN:-}"
+if [[ -z "$TOKEN" ]]; then
+  TOKEN=$(cat "$(dirname "$0")/../runs/live/mcp_token" 2>/dev/null || true)
+fi
+if [[ -z "$TOKEN" ]]; then
+  echo "no MCP token: set MT5_MCP_TOKEN or write runs/live/mcp_token" >&2
+  exit 1
+fi
 URL='http://127.0.0.1:22346/mcp'
 SIDFILE="/tmp/mt5_mcp_sid"
 

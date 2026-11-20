@@ -367,9 +367,10 @@ Design decisions worth knowing:
   that closed *before* adoption are excluded from the trail's best price and
   from the 240-bar time exit. `best` re-seeds at the entry price, exactly as
   `engine::backtest` seeds it.
-- **Ownership tags.** Orders are commented `D3-<PERIOD>`. A runner refuses to
-  adopt a position tagged for another timeframe, because trailing an H1 trade
-  with H4 ATR would put the stop in the wrong place (`--adopt-any` overrides).
+- **Ownership tags.** Orders are commented `D3-<PERIOD>`, matched exactly. A
+  runner ignores positions tagged for another timeframe — trailing an H1 trade
+  with H4 ATR would put the stop in the wrong place — and ignores untagged ones
+  entirely. It only ever modifies its own ticket. `--adopt-any` overrides.
 - **Order payloads are logged** before they are sent, so every live decision has
   an audit trail in `runs/live/rust_<period>_runner.log`.
 
@@ -377,6 +378,42 @@ Handover on 2026-11-18: the Python manager was stopped mid-position and
 `xau-live` adopted `59394653039` (`D3-H4`, 0.10 lot, stop 3814.09) without
 sending or modifying anything. Verified by diffing the broker position before
 and after.
+
+### Operational notes (2026-11-20)
+
+Learned the hard way over the first unattended weekend:
+
+- **The MCP token rotates on every terminal restart.** Symptom: `HTTP 401`
+  on *everything*, reads included, and it looks like the account broke. The
+  token now lives in `runs/live/mcp_token` (gitignored, `chmod 600`); both
+  `xau-live` and `client.py` read it, and `MT5_MCP_TOKEN` overrides it. Never
+  hard-code it again — it was briefly committed, and old tokens are in history.
+- **A terminal restart kills the runners.** They are ordinary processes, not
+  services. Nothing re-starts them, and the broker-side stop is the only thing
+  still working in the gap.
+- **Ownership is the `D3-<PERIOD>` comment, and only exact matches count.**
+  A position without that tag was opened by a human or another system: it is
+  never adopted, trailed or closed, just logged once per change. The first
+  version refused to run at all while an untagged position existed, which made
+  the bot useless exactly when it was needed.
+- **Only our own ticket is ever modified or closed.** Until 2026-11-20 the
+  trail and the time exit acted on `positions[0]`, i.e. whatever happened to be
+  first on the account. With a manual trade open that would have moved or closed
+  someone else's position.
+- **`M1` has to be a valid period.** Entries read the live price from M1; while
+  M1 was missing from the period table every entry died with
+  `unsupported period M1` at the instant the signal fired. Caught by
+  dry-running a live signal before letting it trade.
+
+**Incident, 2026-11-18.** The handover trade `59394653039` (`D3-H4`) was closed
+from the MT5 mobile app at 13:46 server time for **+$10.10**, 14 minutes after
+`xau-live` adopted it. One minute later a naked 0.1 short `59395314229` was
+opened from mobile: no stop, no target, no comment. Both runners were already
+dead from a server restart, so nothing was watching. Gold then fell ~$184 and
+the untagged short carried ~$1,866 of unrealised profit with no protection. It
+was given the strategy's trail stop (`best low 3514.45 + 2.5 × ATR 41.38 =
+3617.90`), locking ~$1,428. This is the honest lesson: a bot that manages one
+track does not protect the account from a human opening a second one.
 
 ### Demo acceptance checklist
 
