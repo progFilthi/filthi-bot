@@ -658,23 +658,103 @@ Redis or a small HTTP fan-out, not before.
 | --- | --- |
 | Header | live price, equity, balance, floating, realised P&L, free margin, terminal + autotrade state |
 | Entry scan | per timeframe: last closed bar, close, 55-bar range, EMA300 (with trend arrow), ATR, time to next bar close, and the read — either **BUY/SELL + stop + risk at 0.10 lot**, or how far price must move to trigger each side |
-| Open positions | side, lots, entry, stop, risk in dollars, target (none — the trail manages it) |
+| Open positions | side, lots, entry, stop, risk in dollars, target (none — the trail manages it), plus **Close** and **Break-even** buttons |
+| Manual order | buy/sell, lots, stop distance, optional target, a review step, then confirm |
 | Runners | whether the H1/H4 process is actually alive, its position and closed count |
 | Equity | stored equity curve (flat periods are drawn as a line, not a block) |
 | Performance | strategy P&L, trades, win rate, average win/loss, manual P&L, all-realised, test trades, best/worst |
 | Closed trades | every closed trade with its attribution tag |
 | Signal history | every signal the scanner has ever seen, from SQLite |
 
+### Placing orders from the page
+
+Scope chosen: **manual trades + manage** — the user trades their own idea; the
+strategy keeps running untouched. Placing an entry is a two-step flow by
+design: **Review** builds a preview, **Confirm** sends. Editing any field
+re-disables Confirm.
+
+Endpoints (all `POST`, all require the `x-dash-token` header):
+
+| Endpoint | Body | Effect |
+| --- | --- | --- |
+| `/api/order` | `{side, lots, sl, tp?, confirm}` | `confirm:false` = preview only; `confirm:true` = send |
+| `/api/close` | `{ticket}` | close one position at market |
+| `/api/breakeven` | `{ticket}` | move that position's stop to its own entry |
+
+Everything below is enforced **server-side**, because the browser is not a
+trust boundary — and neither is the broker's pre-check:
+
+* **Demo accounts only.** The account type must be `demo`, and the terminal
+  must have both MCP trading and Algo Trading enabled.
+* **A stop loss is mandatory**, finite, and on the losing side of a *fresh*
+  quote — checked again at send time, so a confirmation left sitting on screen
+  cannot place a stop through the market after price moved.
+* **Lots are capped at 0.10 and must sit on a 0.01 step**, so a typo cannot open
+  ten lots.
+* **Stop distance is bounded to $0.50–$200.** Tighter is inside the spread;
+  wider is almost always a decimal slip (3500 typed as 350, or 3600 as 3000).
+* **Orders are tagged `manual-ui`**, keeping them out of strategy P&L. The tag
+  joins the empty-comment history in the `manual` bucket.
+* **CSRF gate.** A random per-process token is embedded in the page and required
+  in a custom header on every order call. A website you happen to visit cannot
+  send that header, so it cannot POST to your localhost dashboard. This is not
+  authentication — the dashboard still binds to `127.0.0.1` only.
+* **Audit log.** Every attempt — preview, place, close, break-even — is written
+  to the `orders` table with its outcome and detail, successes included.
+* **Kill switch.** `XAU_DASH_TRADING=0` disables all three endpoints while the
+  dashboard keeps serving.
+
+#### The broker's own check is not validation
+
+Measured on the demo account: `trade_check_market_order` returns `retcode 0 /
+"Done"` for a **buy with the stop loss above the market** (SL 9999 against a
+3575 price) — an order that would be stopped out immediately. Used alone it
+would approve a guaranteed loss. It is used here only for the margin figures it
+reports, never as the gate.
+
+#### The retcode lesson (a live fill reported as "rejected")
+
+The first real test through the dashboard returned
+`{"error": "order rejected: unknown"}` — while the position was **open and
+live** at the broker. The cause: MT5 *write* operations do **not** report
+success as `0`. They return:
+
+* `10008` — Placed
+* `10009` — Done (the normal fill)
+* `10010` — Done, partial
+
+and the human-readable text is in `retcode_details`, not `retcode_string`
+(which is what `trade_check_market_order` uses).
+
+Had that shipped, every successful manual order would have been reported to the
+user as a failure — the worst possible failure mode, because the natural
+reaction is to try again and double the position. Now:
+
+* success is the three-code set above, and a missing code is **not** treated as
+  success;
+* `place` snapshots open position ids before sending and returns the **new**
+  position id (matched by the `manual-ui` comment), which is the handle Close
+  and Break-even need;
+* if the terminal claims success but no new position is visible, the order is
+  reported as *unconfirmed*, not as filled.
+
+#### What the tests cost
+
+Three 0.01-lot round trips on demo: −$1.63, +$0.44, +$0.23 = **−$0.96 net**.
+The −$1.63 was a 40-second hold that drifted against the entry, not a defect;
+the two immediate round trips were near break-even inside the 15-point spread.
+
 ### Attribution is deliberate
 
 Realised P&L is split by the trade's tag, never lumped together:
 
 * `strategy` — comment is exactly `D3-H1` or `D3-H4`, i.e. the bot opened it.
-* `manual` — empty comment, i.e. opened by hand from the phone.
+* `manual` — empty comment (opened by hand from the phone) or `manual-ui`
+  (placed from this dashboard).
 * `test` — everything else (`lot0.1-*`, `xau-bridge-*`, `D3-smoke`).
 
 The current split on the demo account is **strategy −$86.40**, **manual
-+$1,836.56**, **test −$35.46**. Reporting the manual win as bot performance
++$1,835.60**, **test −$35.46**. Reporting the manual win as bot performance
 would be a lie, so the UI separates them and says "too few trades to judge"
 until there are at least 20 strategy trades.
 
@@ -702,7 +782,7 @@ placed outside a validated signal, so even the "strategy" line is not pure.
 | --- | --- |
 | Does the strategy have a measured edge? | **Yes** — 17 years, 14/17 positive, mean +0.12R/trade, both sides, survives 3× spread |
 | Is the edge concentrated in 2025-26? | **Less than it looks** — in R terms 2013 was the best year |
-| Is the bot mechanically ready? | **Yes** — MCP entry/SL/modify/close verified on demo, dashboard live, 43 tests green |
+| Is the bot mechanically ready? | **Yes** — MCP entry/SL/modify/close verified on demo, dashboard live with manual order entry, tests green |
 | Is it ready for demo? | **Yes — start it** |
 | Is it ready for live? | **Not yet** — demo checklist, gap data, volatility sizing, Algo Trading fix |
 | What should we expect? | ~$1,470/yr at fixed 0.10 lot; lumpy, with multi-year flat periods |

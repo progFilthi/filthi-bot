@@ -19,19 +19,21 @@ use std::time::{Duration, Instant};
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse,
     },
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
+
+mod trade;
 
 use xau_live::market::{self, Analysis, SYMBOL};
 use xau_live::mcp::Mcp;
@@ -54,6 +56,19 @@ CREATE TABLE IF NOT EXISTS signals (
     atr     REAL NOT NULL,
     seen    INTEGER NOT NULL,
     PRIMARY KEY (period, bar_ts, side)
+);
+CREATE TABLE IF NOT EXISTS orders (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      INTEGER NOT NULL,
+    action  TEXT NOT NULL,
+    side    TEXT NOT NULL,
+    lots    REAL,
+    price   REAL,
+    sl      REAL,
+    tp      REAL,
+    ticket  TEXT NOT NULL,
+    ok      INTEGER NOT NULL,
+    detail  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trades (
     id       TEXT PRIMARY KEY,
@@ -179,6 +194,11 @@ struct App {
     /// token on restart, so every reconnection re-reads it instead of trusting
     /// the copy loaded at startup.
     token_file: Option<PathBuf>,
+    /// Session token embedded in the page. Order endpoints require it in a
+    /// header, which a cross-site form or fetch cannot supply, so a random
+    /// website you visit cannot POST orders to localhost.
+    dash_token: String,
+    trading_enabled: bool,
     root: PathBuf,
 }
 
@@ -207,11 +227,17 @@ fn is_gold(v: &Value) -> bool {
     sym.is_empty() || sym == SYMBOL
 }
 
+/// Which bucket a closed trade belongs in.
+///
+/// The strategy tags its own trades with the timeframe. Anything placed by the
+/// dashboard's order ticket carries `manual-ui`. History predating that tag has
+/// an empty comment and is also the user's own trading. Everything else is an
+/// experiment and must never be counted as strategy performance.
 fn classify(comment: &str) -> &'static str {
     let c = comment.trim();
     if c == "D3-H1" || c == "D3-H4" {
         "strategy"
-    } else if c.is_empty() {
+    } else if c.is_empty() || c == "manual-ui" {
         "manual"
     } else {
         "test"
@@ -234,6 +260,133 @@ impl App {
             *guard = Some(Mcp::connect(&self.url, &token)?);
         }
         Ok(())
+    }
+
+    fn with_mcp<T>(&self, f: impl FnOnce(&mut Mcp) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        self.connected_mcp()?;
+        let mut guard = self.mcp.lock().unwrap();
+        let m = guard.as_mut().unwrap();
+        f(m)
+    }
+
+    /// Audit every attempt, including the failed ones: the log is the only
+    /// record of what was asked for if something goes wrong.
+    fn audit(&self, action: &str, side: &str, lots: Option<f64>, price: Option<f64>,
+             sl: Option<f64>, tp: Option<f64>, ticket: &str, ok: bool, detail: &str) {
+        let Ok(db) = self.db.lock() else { return };
+        let _ = db.execute(
+            "INSERT INTO orders (ts, action, side, lots, price, sl, tp, ticket, ok, detail)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            rusqlite::params![
+                Utc::now().timestamp(), action, side, lots, price, sl, tp, ticket,
+                if ok { 1i64 } else { 0i64 }, detail
+            ],
+        );
+    }
+
+    fn order(&self, req: trade::OrderReq) -> (StatusCode, Json<Value>) {
+        if !self.trading_enabled {
+            return (StatusCode::FORBIDDEN, Json(json!({
+                "ok": false, "error": "trading is disabled (XAU_DASH_TRADING=0)"
+            })));
+        }
+        let confirm = req.confirm;
+        let res = self.with_mcp(|m| {
+            if confirm {
+                trade::place(m, &req)
+            } else {
+                Ok(serde_json::to_value(trade::preview(m, &req)?)?)
+            }
+        });
+
+        match res {
+            Ok(v) => {
+                let price = v["price"].as_f64();
+                // A placed order is identified by its position id: that is the
+                // handle Close and Break-even need, and the only one a human
+                // can match against the terminal.
+                let (ticket, detail) = if confirm {
+                    let id = v["position_id"].as_str().unwrap_or("").to_string();
+                    let why = v["detail"].as_str().unwrap_or("sent").to_string();
+                    (id, why)
+                } else {
+                    ("".to_string(), "previewed".to_string())
+                };
+                self.audit(
+                    if confirm { "place" } else { "preview" },
+                    &req.side, Some(req.lots), price, Some(req.sl), req.tp,
+                    &ticket, true, &detail,
+                );
+                if confirm {
+                    // Reflect the new position immediately rather than waiting
+                    // for the next poll tick.
+                    self.refresh(false);
+                }
+                (StatusCode::OK, Json(json!({ "ok": true, "confirm": confirm, "data": v })))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.audit(
+                    if confirm { "place" } else { "preview" },
+                    &req.side, Some(req.lots), None, Some(req.sl), req.tp,
+                    "", false, &msg,
+                );
+                (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": msg })))
+            }
+        }
+    }
+
+    fn close(&self, ticket: &str) -> (StatusCode, Json<Value>) {
+        if !self.trading_enabled {
+            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": "trading is disabled" })));
+        }
+        match self.with_mcp(|m| trade::close(m, ticket)) {
+            Ok(v) => {
+                self.audit("close", "", None, None, None, None, ticket, true, "closed");
+                self.refresh(false);
+                (StatusCode::OK, Json(json!({ "ok": true, "data": v })))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.audit("close", "", None, None, None, None, ticket, false, &msg);
+                (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": msg })))
+            }
+        }
+    }
+
+    /// Put the stop at the position's own entry (plus spread on a sell).
+    fn breakeven(&self, ticket: &str) -> (StatusCode, Json<Value>) {
+        if !self.trading_enabled {
+            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": "trading is disabled" })));
+        }
+        let res = self.with_mcp(|m| {
+            let positions = market::positions(m)?;
+            let p = positions
+                .iter()
+                .find(|p| market::field(p, "position_id") == ticket.trim())
+                .ok_or_else(|| anyhow::anyhow!("position {ticket} is not open"))?;
+            let entry = market::as_f64(&p["price_open"]);
+            let side = market::field(p, "action");
+            let (_, _, spread) = trade::quote(m)?;
+            let sl = trade::breakeven_price(entry, &side, spread);
+            trade::modify_stop(m, ticket, sl)
+        });
+        match res {
+            Ok(v) => {
+                self.audit("breakeven", "", None, None, None, None, ticket, true, "stop moved to entry");
+                self.refresh(false);
+                (StatusCode::OK, Json(json!({ "ok": true, "data": v })))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.audit("breakeven", "", None, None, None, None, ticket, false, &msg);
+                (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": msg })))
+            }
+        }
+    }
+
+    fn page(&self) -> String {
+        INDEX.replace("__DASH_TOKEN__", &self.dash_token)
     }
 
     /// One refresh: account + positions + price every tick, full scan less often.
@@ -546,8 +699,82 @@ fn parse_ts(s: &str) -> Option<i64> {
         .map(|d| d.and_utc().timestamp())
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX)
+async fn index(State(app): State<Arc<App>>) -> Html<String> {
+    Html(app.page())
+}
+
+/// Order endpoints are reachable from any page in the browser unless we check
+/// something a cross-origin request cannot produce. A custom header that only
+/// our own JS sets is exactly that.
+fn require_token(app: &App, headers: &HeaderMap) -> Result<(), (StatusCode, Json<Value>)> {
+    let got = headers
+        .get("x-dash-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if got == app.dash_token {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "ok": false, "error": "missing or wrong dashboard token" })),
+        ))
+    }
+}
+
+async fn api_order(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(req): Json<trade::OrderReq>,
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = require_token(&app, &headers) {
+        return e;
+    }
+    let a = app.clone();
+    match tokio::task::spawn_blocking(move || a.order(req)).await {
+        Ok(r) => r,
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("worker failed: {e}") })),
+        ),
+    }
+}
+
+async fn api_close(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = require_token(&app, &headers) {
+        return e;
+    }
+    let ticket = body["ticket"].as_str().unwrap_or("").to_string();
+    let a = app.clone();
+    match tokio::task::spawn_blocking(move || a.close(&ticket)).await {
+        Ok(r) => r,
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("worker failed: {e}") })),
+        ),
+    }
+}
+
+async fn api_breakeven(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = require_token(&app, &headers) {
+        return e;
+    }
+    let ticket = body["ticket"].as_str().unwrap_or("").to_string();
+    let a = app.clone();
+    match tokio::task::spawn_blocking(move || a.breakeven(&ticket)).await {
+        Ok(r) => r,
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("worker failed: {e}") })),
+        ),
+    }
 }
 
 async fn api_state(State(app): State<Arc<App>>) -> impl IntoResponse {
@@ -583,6 +810,9 @@ fn router(app: Arc<App>) -> Router {
         .route("/api/history", get(api_history))
         .route("/api/stream", get(api_stream))
         .route("/healthz", get(api_health))
+        .route("/api/order", post(api_order))
+        .route("/api/close", post(api_close))
+        .route("/api/breakeven", post(api_breakeven))
         .with_state(app)
 }
 
@@ -626,6 +856,27 @@ async fn main() -> anyhow::Result<()> {
     let db = Connection::open(root.join("runs/dashboard/history.db"))?;
     db.execute_batch(SCHEMA)?;
 
+    // 128 bits from the OS-seeded RandomState; only used to gate order
+    // endpoints on this machine, not to protect a network service.
+    let dash_token = {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        h.write_u32(std::process::id());
+        let a = h.finish();
+        let b = a.rotate_left(29) ^ 0x9e37_79b9_7f4a_7c15;
+        format!("{a:016x}{b:016x}")
+    };
+    let trading_enabled = std::env::var("XAU_DASH_TRADING")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+
     let (tx, _) = tokio::sync::broadcast::channel(64);
     let app = Arc::new(App {
         mcp: Mutex::new(None),
@@ -636,6 +887,8 @@ async fn main() -> anyhow::Result<()> {
         url,
         token: RwLock::new(token),
         token_file,
+        dash_token,
+        trading_enabled,
         root,
     });
 
@@ -681,6 +934,8 @@ mod tests {
         assert_eq!(classify("D3-H1"), "strategy");
         assert_eq!(classify(" D3-H4 "), "strategy");
         assert_eq!(classify(""), "manual");
+        assert_eq!(classify("manual-ui"), "manual", "dashboard orders are the user's own trades");
+        assert_eq!(classify(" manual-ui "), "manual");
         assert_eq!(classify("lot0.1-3"), "test");
         assert_eq!(classify("xau-bridge-0"), "test");
         assert_eq!(classify("D3-smoke"), "test");
