@@ -4,6 +4,9 @@
 **Strategy:** D3 — Donchian 55 breakout, SL 1.5 ATR, trail 2.5 ATR, 240-bar exit, EMA300
 **Size:** 0.10 lot | **Deposit:** $25,000 | **Spread:** 20 pts
 **Evidence base:** `docs/strategy-long-history.md` (17-year validation)
+**Intraday alternative:** `docs/strategy-orb.md` — the London breakout was
+built and tested for prop-account use; it is a paper-trade candidate, not a
+validated edge, and does not replace D3.
 
 ---
 

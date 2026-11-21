@@ -4,6 +4,7 @@
 //! No look-ahead: signals on bar close only; fill at next open.
 
 pub mod engine;
+pub mod orb;
 pub mod strategy;
 
 use std::collections::VecDeque;

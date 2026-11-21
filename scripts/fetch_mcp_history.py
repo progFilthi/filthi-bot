@@ -33,6 +33,24 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 TOKEN = "oo6totlCD01Iu//GWbs0E/0qqP28lE+8TGkXB/WXYL"
+
+
+def _load_token() -> str:
+    """The terminal rotates its token on restart; prefer the live copy."""
+    import os
+
+    env = os.environ.get("XAU_MCP_TOKEN")
+    if env:
+        return env.strip()
+    for p in ("runs/live/mcp_token", "../runs/live/mcp_token"):
+        try:
+            with open(p) as fh:
+                t = fh.read().strip()
+            if t:
+                return t
+        except OSError:
+            pass
+    return TOKEN
 HOST = "127.0.0.1"
 PORT = 22346
 PATH = "/mcp"
@@ -179,6 +197,9 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--warmup-calls", type=int, default=150)
     args = ap.parse_args()
+
+    global TOKEN
+    TOKEN = _load_token()
 
     start = f"{args.start}T00:00:00"
     end = f"{args.end}T00:00:00"

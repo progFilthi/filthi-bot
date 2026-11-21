@@ -51,3 +51,7 @@ path = "src/bin/tpsweep.rs"
 [[bin]]
 name = "xau-winsweep"
 path = "src/bin/winsweep.rs"
+
+[[bin]]
+name = "xau-orb"
+path = "src/bin/orb.rs"
