@@ -799,7 +799,9 @@ On M15, everything held for 5 hours or less nets **−$44,039**; the edge begins
 after that. So "shorter than five hours" is not a setting on this strategy, it
 is a different strategy, and it needs its own validation before it gets money.
 The closest thing to an intraday version is M15 (winners typically run 5–15
-hours), at PF 1.10 over 4 years — noticeably weaker than H1/H4.
+hours), at PF 1.10 over 4 years — noticeably weaker than H1/H4. **Decision:
+no short-hold variant.** The board stays on H1 and H4; the only cap is the
+240-bar exit that is part of the validated rule.
 
 ### Attribution is deliberate
 

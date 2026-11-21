@@ -88,6 +88,9 @@
   .tiny.use:hover{color:var(--blue);border-color:var(--blue)}
   .rec{color:var(--dim);font-size:11px;margin-top:5px;min-height:14px}
   .rec.warn{color:var(--amber)}
+  .rules td{white-space:normal;text-align:left;vertical-align:top;line-height:1.4}
+  .rules th{text-align:left}
+  .rules td:first-child{white-space:nowrap}
 
   /* --- order ticket --- */
   .seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
@@ -152,6 +155,15 @@
     #scan td.read{grid-column:1/-1;white-space:normal;margin-top:4px;display:flex;
                   align-items:baseline;gap:8px;flex-wrap:wrap}
     #scan td.read::before{display:none}
+    .rules thead{display:none}
+    .rules tbody,.rules tr,.rules td{display:block}
+    .rules tr{padding:10px 0;border-top:1px solid var(--line)}
+    .rules td{border:0;padding:2px 0;white-space:normal;font-size:12.5px}
+    .rules td::before{content:attr(data-l);display:inline-block;min-width:62px;
+                      color:var(--dim);font-size:9px;letter-spacing:.1em;
+                      text-transform:uppercase}
+    .rules td:first-child{font-size:15px;padding-bottom:4px}
+    .rules td:first-child::before{content:"";min-width:0}
     .card h2{flex-wrap:wrap}
     .card h2>span:first-child{white-space:nowrap}
     #chart{height:110px}
@@ -216,6 +228,43 @@
       </div>
       <div class="msg" id="order-msg"></div>
       <div class="rec" id="order-record"></div>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="card wide">
+      <h2><span>How the bot trades</span><span class="muted">the runner does this — not this page</span></h2>
+      <div class="scroll">
+        <table class="rules">
+          <thead><tr>
+            <th>Track</th><th>Checks</th><th>Enters</th><th>Stop</th><th>Exit</th><th>Size</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td><b>H1</b></td>
+              <td data-l="checks">once per closed H1 bar, at :00 server time</td>
+              <td data-l="enters">close outside the last 55 hourly bars, and only in the EMA300 direction</td>
+              <td data-l="stop">1.5 × ATR(14) at entry</td>
+              <td data-l="exit">trail 2.5 × ATR · hard cap 240 bars (≈10 trading days)</td>
+              <td data-l="size">0.01 lot ≈ $40–60 risk</td>
+            </tr>
+            <tr>
+              <td><b>H4</b></td>
+              <td data-l="checks">once per closed H4 bar, at 00/04/08/12/16/20</td>
+              <td data-l="enters">close outside the last 55 four-hour bars, and only in the EMA300 direction</td>
+              <td data-l="stop">1.5 × ATR(14) at entry</td>
+              <td data-l="exit">trail 2.5 × ATR · hard cap 240 bars (≈40 trading days)</td>
+              <td data-l="size">0.10 lot ≈ $500–650 risk · stopped</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin:9px 0 0">
+        No take profit — tested, and a fixed target cut the winners that pay for everything.
+        The exit is the trailing stop, or the bar cap if the trade goes nowhere.
+        One position per track, no re-entry while it is open. These are opened by the
+        runner process; anything you send from “Your order” is manual.
+      </div>
     </section>
   </div>
 
