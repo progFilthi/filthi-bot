@@ -32,6 +32,21 @@ pub const MAX_STOP_USD: f64 = 200.0;
 /// Tag written on every order from this UI.
 pub const COMMENT: &str = "manual-ui";
 
+/// The comment for an order, recording which signal it came from when the
+/// trader copied one. Still a *manual* order — a human pressed the button —
+/// but the provenance is visible in the terminal and in the audit log.
+pub fn comment_for(source: &Option<String>) -> String {
+    match source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) if market::SCAN_PERIODS.contains(&p) => format!("{COMMENT}:{p}"),
+        _ => COMMENT.to_string(),
+    }
+}
+
+/// True for anything this UI placed, with or without a signal source.
+pub fn is_ui_comment(c: &str) -> bool {
+    c.trim().starts_with(COMMENT)
+}
+
 /// MT5 trade return codes that mean the order is live. Success is **not** 0:
 /// a filled market order comes back as 10009 (Done), 10008 (Placed) or 10010
 /// (Done, partial). Treating anything non-zero as failure reports a live
@@ -72,6 +87,10 @@ pub struct OrderReq {
     /// false/absent = preview only, true = actually send.
     #[serde(default)]
     pub confirm: bool,
+    /// Timeframe whose signal the trader copied, if any ("H1", "H4", ...).
+    /// Recorded in the comment; never changes the fact that this is manual.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -153,6 +172,16 @@ pub fn validate(req: &OrderReq, bid: f64, ask: f64) -> Result<()> {
     if !req.sl.is_finite() || req.sl <= 0.0 {
         bail!("a stop loss is required");
     }
+    if let Some(src) = req
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !market::SCAN_PERIODS.contains(&src) {
+            bail!("unknown signal source {src:?}");
+        }
+    }
 
     let entry = if req.side == "buy" { ask } else { bid };
     let dist = stop_distance(req, entry);
@@ -184,7 +213,11 @@ pub fn validate(req: &OrderReq, bid: f64, ask: f64) -> Result<()> {
         if !tp.is_finite() || tp <= 0.0 {
             bail!("take profit must be a positive price");
         }
-        let win = if req.side == "buy" { tp - entry } else { entry - tp };
+        let win = if req.side == "buy" {
+            tp - entry
+        } else {
+            entry - tp
+        };
         if win <= 0.0 {
             bail!(
                 "take profit must be {} the entry price",
@@ -216,7 +249,10 @@ pub fn preview(m: &mut Mcp, req: &OrderReq) -> Result<Preview> {
     let check = m.call("trade_check_market_order", args)?;
     let result = &check["result"];
     if check["ok"].as_bool() == Some(false) {
-        bail!("broker check failed: {}", check["error"].as_str().unwrap_or("unknown"));
+        bail!(
+            "broker check failed: {}",
+            check["error"].as_str().unwrap_or("unknown")
+        );
     }
     if let Some(rc) = result["retcode"].as_i64() {
         if rc != 0 {
@@ -241,7 +277,7 @@ pub fn preview(m: &mut Mcp, req: &OrderReq) -> Result<Preview> {
         margin: market::as_f64(&result["margin"]),
         margin_free: market::as_f64(&result["margin_free"]),
         spread_pts: spread,
-        comment: COMMENT.to_string(),
+        comment: comment_for(&req.source),
     })
 }
 
@@ -258,7 +294,7 @@ pub fn place(m: &mut Mcp, req: &OrderReq) -> Result<Value> {
         "type": req.side,
         "volume": req.lots,
         "sl": sl,
-        "comment": COMMENT,
+        "comment": comment_for(&req.source),
     });
     if let Some(tp) = req.tp {
         order["tp"] = json!(round2(tp));
@@ -273,7 +309,7 @@ pub fn place(m: &mut Mcp, req: &OrderReq) -> Result<Value> {
 
     let after = market::positions(m)?;
     let opened = after.iter().find(|p| {
-        market::field(p, "comment").trim() == COMMENT
+        is_ui_comment(&market::field(p, "comment"))
             && !before.contains(&market::field(p, "position_id"))
     });
 
@@ -289,7 +325,9 @@ pub fn place(m: &mut Mcp, req: &OrderReq) -> Result<Value> {
         None if !is_done(rc) => bail!("order rejected: {why}"),
         // The terminal says done but no new position is visible: surface it
         // instead of claiming success we cannot see.
-        None => bail!("terminal reported \"{why}\" but no new position is open — check the terminal"),
+        None => {
+            bail!("terminal reported \"{why}\" but no new position is open — check the terminal")
+        }
     }
 }
 
@@ -349,7 +387,11 @@ pub fn modify_stop(m: &mut Mcp, ticket: &str, sl: f64) -> Result<Value> {
 /// break-even really is break-even after paying to get out.
 pub fn breakeven_price(entry: f64, side: &str, spread_pts: f64) -> f64 {
     let pad = spread_pts * 0.01;
-    round2(if side == "buy" { entry + pad } else { entry - pad })
+    round2(if side == "buy" {
+        entry + pad
+    } else {
+        entry - pad
+    })
 }
 
 #[cfg(test)]
@@ -357,7 +399,14 @@ mod tests {
     use super::*;
 
     fn req(side: &str, lots: f64, sl: f64) -> OrderReq {
-        OrderReq { side: side.into(), lots, sl, tp: None, confirm: false }
+        OrderReq {
+            side: side.into(),
+            lots,
+            sl,
+            tp: None,
+            confirm: false,
+            source: None,
+        }
     }
 
     // bid 3500.00, ask 3500.15
@@ -400,8 +449,14 @@ mod tests {
 
     #[test]
     fn rejects_stops_that_are_too_tight_or_absurd() {
-        assert!(validate(&req("buy", 0.01, 3500.10), BID, ASK).is_err(), "3 cents");
-        assert!(validate(&req("buy", 0.01, 3200.0), BID, ASK).is_err(), "$300");
+        assert!(
+            validate(&req("buy", 0.01, 3500.10), BID, ASK).is_err(),
+            "3 cents"
+        );
+        assert!(
+            validate(&req("buy", 0.01, 3200.0), BID, ASK).is_err(),
+            "$300"
+        );
     }
 
     #[test]
@@ -423,6 +478,31 @@ mod tests {
     fn stop_distance_uses_the_side_you_enter_on() {
         assert!((stop_distance(&req("buy", 0.01, 3490.0), ASK) - 10.15).abs() < 1e-9);
         assert!((stop_distance(&req("sell", 0.01, 3510.0), BID) - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn signal_source_is_recorded_but_stays_manual() {
+        assert_eq!(comment_for(&None), "manual-ui");
+        assert_eq!(comment_for(&Some("H1".into())), "manual-ui:H1");
+        assert_eq!(comment_for(&Some(" H4 ".into())), "manual-ui:H4");
+        assert_eq!(comment_for(&Some("".into())), "manual-ui");
+        assert_eq!(
+            comment_for(&Some("M1".into())),
+            "manual-ui",
+            "not a scanned timeframe"
+        );
+        assert!(is_ui_comment("manual-ui"));
+        assert!(is_ui_comment("manual-ui:H1"));
+        assert!(!is_ui_comment("D3-H1"));
+    }
+
+    #[test]
+    fn rejects_an_unknown_signal_source() {
+        let mut r = req("buy", 0.01, 3480.0);
+        r.source = Some("H2".into());
+        assert!(validate(&r, BID, ASK).is_err());
+        r.source = Some("H4".into());
+        assert!(validate(&r, BID, ASK).is_ok());
     }
 
     #[test]

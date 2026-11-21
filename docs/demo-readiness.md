@@ -744,13 +744,71 @@ Three 0.01-lot round trips on demo: −$1.63, +$0.44, +$0.23 = **−$0.96 net**.
 The −$1.63 was a 40-second hold that drifted against the entry, not a defect;
 the two immediate round trips were near break-even inside the 15-point spread.
 
+### Signals are not orders
+
+The scan panel and the order ticket answer two different questions, and the UI
+now says so:
+
+* **Signals** — what the strategy would do on the last *closed* bar of each
+  timeframe. A `BUY` here means the Donchian 55 breakout and the EMA300 gate
+  agree at that close. Nothing has been executed.
+* **Your order** — what you are about to send. It counts as **manual** P&L,
+  always, because a human pressed the button.
+
+**"Use plan"** copies a signal into the ticket: side, and a stop distance equal
+to the gap between the live price and the stop the strategy would have used. It
+does not send anything; you still get Review → Confirm. The order's comment
+records where the plan came from (`manual-ui:H1`, `manual-ui:H4`), so the
+terminal, the closed-trades list and the audit log all show the provenance.
+`classify` treats anything starting with `manual-ui` as manual — including those
+suffixed comments — so the strategy line stays pure.
+
+The ticket also shows the plan's historical record, labelled as history rather
+than a forecast: H4 PF 1.81 over 16 years, H1 PF 1.32, M15 PF 1.10, and M5
+marked **not validated** (1.4 years of data).
+
+### Knowing the market is shut
+
+On a weekend the terminal happily accepts a connection and serves Friday's
+bars, so "connected" is not "tradeable". The trade server's clock is the
+giveaway: `trade_server_last_known_time` only advances when quotes arrive. The
+dashboard samples it against UTC and compares two consecutive polls:
+
+* broker clock moved → the feed is live;
+* UTC moved ≥3s and the broker clock did not → **closed** (or the link is dead,
+  which is just as untradeable);
+* one sample, or a clock step backwards → unknown, and the UI does not guess.
+
+While closed, `/api/order` returns **409** with a plain reason, and the page
+shows a banner with the last quote time. `Confirm` and `Review` are disabled
+client-side as well. Close and break-even are deliberately **not** gated: if a
+position is open you should always be able to ask for an exit.
+
+### The 5-hour hold question
+
+Measured on the validated D3 runs, profit lives in the *long* trades. A 5-hour
+cap would keep the losing half and cut the winning half:
+
+| Timeframe | ≤8 bars (loss) | 9–20 bars | 21–60 bars |
+| --- | --- | --- | --- |
+| H4 (4h bars) | −$16,958 | +$14,763 | **+$29,505** |
+| H1 (1h bars) | −$57,478 | +$21,189 | **+$62,162** |
+| M15 (15m bars) | −$58,523 | +$14,483 | **+$50,063** |
+
+On M15, everything held for 5 hours or less nets **−$44,039**; the edge begins
+after that. So "shorter than five hours" is not a setting on this strategy, it
+is a different strategy, and it needs its own validation before it gets money.
+The closest thing to an intraday version is M15 (winners typically run 5–15
+hours), at PF 1.10 over 4 years — noticeably weaker than H1/H4.
+
 ### Attribution is deliberate
 
 Realised P&L is split by the trade's tag, never lumped together:
 
 * `strategy` — comment is exactly `D3-H1` or `D3-H4`, i.e. the bot opened it.
-* `manual` — empty comment (opened by hand from the phone) or `manual-ui`
-  (placed from this dashboard).
+* `manual` — empty comment (opened by hand from the phone), `manual-ui`
+  (placed from this dashboard), or `manual-ui:<TF>` (placed from a copied
+  signal; the suffix records which one, not who decided).
 * `test` — everything else (`lot0.1-*`, `xau-bridge-*`, `D3-smoke`).
 
 The current split on the demo account is **strategy −$86.40**, **manual

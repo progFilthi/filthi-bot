@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -180,6 +181,11 @@ struct Snapshot {
     deals: Vec<Deal>,
     /// Live price from the forming M1 bar.
     price: f64,
+    /// Whether the broker is currently sending quotes. `None` until the clock
+    /// has been sampled twice; see `App::observe_clock`.
+    market_open: Option<bool>,
+    /// Last quote time from the trade server, as the terminal reports it.
+    broker_time: String,
 }
 
 struct App {
@@ -199,6 +205,8 @@ struct App {
     /// website you visit cannot POST orders to localhost.
     dash_token: String,
     trading_enabled: bool,
+    /// Last (UTC, broker) clock pair, used to notice a stalled quote feed.
+    clock: Mutex<Option<(i64, i64)>>,
     root: PathBuf,
 }
 
@@ -237,11 +245,31 @@ fn classify(comment: &str) -> &'static str {
     let c = comment.trim();
     if c == "D3-H1" || c == "D3-H4" {
         "strategy"
-    } else if c.is_empty() || c == "manual-ui" {
+    } else if c.is_empty() || trade::is_ui_comment(c) {
         "manual"
     } else {
         "test"
     }
+}
+
+/// UTC now and the trade server's last known time, both as epoch seconds.
+///
+/// The broker timestamp is the moment of the last quote the server sent, not a
+/// ticking wall clock. During a weekend or holiday it stops advancing while
+/// UTC keeps going, which is a direct answer to "can I trade right now?" that
+/// does not depend on a hardcoded session table (holidays move).
+fn clock_pair(m: &mut Mcp) -> anyhow::Result<(i64, i64, String)> {
+    let t = m.call("get_time_information", json!({}))?;
+    let utc_s = t["utc_time"]
+        .as_str()
+        .context("no utc_time from terminal")?
+        .trim_end_matches('Z');
+    let broker_s = t["trade_server_last_known_time"]
+        .as_str()
+        .context("no trade_server_last_known_time from terminal")?;
+    let utc = market::parse_naive(utc_s)?.and_utc().timestamp();
+    let broker = market::parse_naive(broker_s)?.and_utc().timestamp();
+    Ok((utc, broker, broker_s.to_string()))
 }
 
 impl App {
@@ -262,6 +290,32 @@ impl App {
         Ok(())
     }
 
+    /// Decide whether the broker is live by watching its clock against UTC.
+    ///
+    /// A quote feed that is working moves `broker` forward on every poll. A
+    /// closed market (or a dead link) leaves it frozen while `utc` advances.
+    /// Returns `None` while there is not enough evidence to say, so a single
+    /// sample at startup cannot flip the UI into "closed".
+    fn observe_clock(&self, utc: i64, broker: i64) -> Option<bool> {
+        let mut c = self.clock.lock().unwrap();
+        let verdict = match *c {
+            Some((prev_utc, prev_broker)) => {
+                if utc < prev_utc {
+                    None // clock stepped backwards; do not guess
+                } else if broker > prev_broker {
+                    Some(true)
+                } else if utc - prev_utc >= 3 {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        *c = Some((utc, broker));
+        verdict
+    }
+
     fn with_mcp<T>(&self, f: impl FnOnce(&mut Mcp) -> anyhow::Result<T>) -> anyhow::Result<T> {
         self.connected_mcp()?;
         let mut guard = self.mcp.lock().unwrap();
@@ -271,24 +325,54 @@ impl App {
 
     /// Audit every attempt, including the failed ones: the log is the only
     /// record of what was asked for if something goes wrong.
-    fn audit(&self, action: &str, side: &str, lots: Option<f64>, price: Option<f64>,
-             sl: Option<f64>, tp: Option<f64>, ticket: &str, ok: bool, detail: &str) {
+    fn audit(
+        &self,
+        action: &str,
+        side: &str,
+        lots: Option<f64>,
+        price: Option<f64>,
+        sl: Option<f64>,
+        tp: Option<f64>,
+        ticket: &str,
+        ok: bool,
+        detail: &str,
+    ) {
         let Ok(db) = self.db.lock() else { return };
         let _ = db.execute(
             "INSERT INTO orders (ts, action, side, lots, price, sl, tp, ticket, ok, detail)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             rusqlite::params![
-                Utc::now().timestamp(), action, side, lots, price, sl, tp, ticket,
-                if ok { 1i64 } else { 0i64 }, detail
+                Utc::now().timestamp(),
+                action,
+                side,
+                lots,
+                price,
+                sl,
+                tp,
+                ticket,
+                if ok { 1i64 } else { 0i64 },
+                detail
             ],
         );
     }
 
     fn order(&self, req: trade::OrderReq) -> (StatusCode, Json<Value>) {
         if !self.trading_enabled {
-            return (StatusCode::FORBIDDEN, Json(json!({
-                "ok": false, "error": "trading is disabled (XAU_DASH_TRADING=0)"
-            })));
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "ok": false, "error": "trading is disabled (XAU_DASH_TRADING=0)"
+                })),
+            );
+        }
+        if self.snap.read().unwrap().market_open == Some(false) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "ok": false,
+                    "error": "the market is closed — the broker has sent no quotes since the last session. Wait for it to reopen."
+                })),
+            );
         }
         let confirm = req.confirm;
         let res = self.with_mcp(|m| {
@@ -314,31 +398,52 @@ impl App {
                 };
                 self.audit(
                     if confirm { "place" } else { "preview" },
-                    &req.side, Some(req.lots), price, Some(req.sl), req.tp,
-                    &ticket, true, &detail,
+                    &req.side,
+                    Some(req.lots),
+                    price,
+                    Some(req.sl),
+                    req.tp,
+                    &ticket,
+                    true,
+                    &detail,
                 );
                 if confirm {
                     // Reflect the new position immediately rather than waiting
                     // for the next poll tick.
                     self.refresh(false);
                 }
-                (StatusCode::OK, Json(json!({ "ok": true, "confirm": confirm, "data": v })))
+                (
+                    StatusCode::OK,
+                    Json(json!({ "ok": true, "confirm": confirm, "data": v })),
+                )
             }
             Err(e) => {
                 let msg = format!("{e:#}");
                 self.audit(
                     if confirm { "place" } else { "preview" },
-                    &req.side, Some(req.lots), None, Some(req.sl), req.tp,
-                    "", false, &msg,
+                    &req.side,
+                    Some(req.lots),
+                    None,
+                    Some(req.sl),
+                    req.tp,
+                    "",
+                    false,
+                    &msg,
                 );
-                (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": msg })))
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "ok": false, "error": msg })),
+                )
             }
         }
     }
 
     fn close(&self, ticket: &str) -> (StatusCode, Json<Value>) {
         if !self.trading_enabled {
-            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": "trading is disabled" })));
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "ok": false, "error": "trading is disabled" })),
+            );
         }
         match self.with_mcp(|m| trade::close(m, ticket)) {
             Ok(v) => {
@@ -349,7 +454,10 @@ impl App {
             Err(e) => {
                 let msg = format!("{e:#}");
                 self.audit("close", "", None, None, None, None, ticket, false, &msg);
-                (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": msg })))
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "ok": false, "error": msg })),
+                )
             }
         }
     }
@@ -357,7 +465,10 @@ impl App {
     /// Put the stop at the position's own entry (plus spread on a sell).
     fn breakeven(&self, ticket: &str) -> (StatusCode, Json<Value>) {
         if !self.trading_enabled {
-            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": "trading is disabled" })));
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "ok": false, "error": "trading is disabled" })),
+            );
         }
         let res = self.with_mcp(|m| {
             let positions = market::positions(m)?;
@@ -373,14 +484,27 @@ impl App {
         });
         match res {
             Ok(v) => {
-                self.audit("breakeven", "", None, None, None, None, ticket, true, "stop moved to entry");
+                self.audit(
+                    "breakeven",
+                    "",
+                    None,
+                    None,
+                    None,
+                    None,
+                    ticket,
+                    true,
+                    "stop moved to entry",
+                );
                 self.refresh(false);
                 (StatusCode::OK, Json(json!({ "ok": true, "data": v })))
             }
             Err(e) => {
                 let msg = format!("{e:#}");
                 self.audit("breakeven", "", None, None, None, None, ticket, false, &msg);
-                (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": msg })))
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "ok": false, "error": msg })),
+                )
             }
         }
     }
@@ -419,6 +543,13 @@ impl App {
             // The account payload exposes terminal wall-clock in UTC; the
             // broker's own clock (used for bar closes) comes from the runner.
             snap.server_time = market::field(t, "timestamp");
+
+            if let Ok((utc, broker, broker_s)) = clock_pair(m) {
+                if let Some(open) = self.observe_clock(utc, broker) {
+                    snap.market_open = Some(open);
+                }
+                snap.broker_time = broker_s;
+            }
 
             if let Ok(px) = market::last_price(m) {
                 snap.price = px;
@@ -564,7 +695,8 @@ impl App {
                    (id, closed, side, lots, entry, exit, profit, tag, kind, reason)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
-                    d.id, closed, d.side, d.lots, d.entry, d.exit, d.profit, d.tag, d.kind, d.reason
+                    d.id, closed, d.side, d.lots, d.entry, d.exit, d.profit, d.tag, d.kind,
+                    d.reason
                 ],
             );
         }
@@ -668,8 +800,26 @@ fn summarise(rows: &[Value]) -> (Vec<Deal>, Perf) {
     if p.deals > 0 {
         p.win_rate = p.wins as f64 / p.deals as f64 * 100.0;
     }
-    p.avg_win = if p.wins > 0 { deals.iter().filter(|d| d.profit > 0.0).map(|d| d.profit).sum::<f64>() / p.wins as f64 } else { 0.0 };
-    p.avg_loss = if p.losses > 0 { deals.iter().filter(|d| d.profit <= 0.0).map(|d| d.profit).sum::<f64>() / p.losses as f64 } else { 0.0 };
+    p.avg_win = if p.wins > 0 {
+        deals
+            .iter()
+            .filter(|d| d.profit > 0.0)
+            .map(|d| d.profit)
+            .sum::<f64>()
+            / p.wins as f64
+    } else {
+        0.0
+    };
+    p.avg_loss = if p.losses > 0 {
+        deals
+            .iter()
+            .filter(|d| d.profit <= 0.0)
+            .map(|d| d.profit)
+            .sum::<f64>()
+            / p.losses as f64
+    } else {
+        0.0
+    };
 
     p.strategy_deals = strat.len() as u32;
     p.strategy_wins = strat.iter().filter(|&&x| x > 0.0).count() as u32;
@@ -677,11 +827,19 @@ fn summarise(rows: &[Value]) -> (Vec<Deal>, Perf) {
         p.strategy_win_rate = p.strategy_wins as f64 / strat.len() as f64 * 100.0;
         p.strategy_avg_win = {
             let w: Vec<f64> = strat.iter().copied().filter(|&x| x > 0.0).collect();
-            if w.is_empty() { 0.0 } else { w.iter().sum::<f64>() / w.len() as f64 }
+            if w.is_empty() {
+                0.0
+            } else {
+                w.iter().sum::<f64>() / w.len() as f64
+            }
         };
         p.strategy_avg_loss = {
             let l: Vec<f64> = strat.iter().copied().filter(|&x| x <= 0.0).collect();
-            if l.is_empty() { 0.0 } else { l.iter().sum::<f64>() / l.len() as f64 }
+            if l.is_empty() {
+                0.0
+            } else {
+                l.iter().sum::<f64>() / l.len() as f64
+            }
         };
         p.strategy_best = strat.iter().copied().fold(0.0f64, f64::max);
         p.strategy_worst = strat.iter().copied().fold(0.0f64, f64::min);
@@ -778,7 +936,11 @@ async fn api_breakeven(
 }
 
 async fn api_state(State(app): State<Arc<App>>) -> impl IntoResponse {
-    let body = app.body.read().map(|s| s.clone()).unwrap_or_else(|_| "{}".into());
+    let body = app
+        .body
+        .read()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "{}".into());
     ([("content-type", "application/json")], body)
 }
 
@@ -788,7 +950,11 @@ async fn api_history(State(app): State<Arc<App>>) -> impl IntoResponse {
 
 async fn api_health(State(app): State<Arc<App>>) -> impl IntoResponse {
     let ok = app.snap.read().map(|s| s.connected).unwrap_or(false);
-    let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let code = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     (code, axum::Json(json!({ "ok": ok })))
 }
 
@@ -845,7 +1011,10 @@ async fn main() -> anyhow::Result<()> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("no MCP token: set MT5_MCP_TOKEN or write {}", token_path.display())
+                    anyhow::anyhow!(
+                        "no MCP token: set MT5_MCP_TOKEN or write {}",
+                        token_path.display()
+                    )
                 })?;
             (t, Some(token_path.clone()))
         }
@@ -889,6 +1058,7 @@ async fn main() -> anyhow::Result<()> {
         token_file,
         dash_token,
         trading_enabled,
+        clock: Mutex::new(None),
         root,
     });
 
@@ -907,7 +1077,6 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, router(app)).await?;
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -934,7 +1103,11 @@ mod tests {
         assert_eq!(classify("D3-H1"), "strategy");
         assert_eq!(classify(" D3-H4 "), "strategy");
         assert_eq!(classify(""), "manual");
-        assert_eq!(classify("manual-ui"), "manual", "dashboard orders are the user's own trades");
+        assert_eq!(
+            classify("manual-ui"),
+            "manual",
+            "dashboard orders are the user's own trades"
+        );
         assert_eq!(classify(" manual-ui "), "manual");
         assert_eq!(classify("lot0.1-3"), "test");
         assert_eq!(classify("xau-bridge-0"), "test");
@@ -963,7 +1136,11 @@ mod tests {
         no_symbol.as_object_mut().unwrap().remove("symbol");
         let rows = vec![row("1", "D3-H1", 1.0, "EURUSD"), no_symbol];
         let (deals, p) = summarise(&rows);
-        assert_eq!(deals.len(), 1, "a row without a symbol must still be counted");
+        assert_eq!(
+            deals.len(),
+            1,
+            "a row without a symbol must still be counted"
+        );
         assert!((p.strategy_net - 5.0).abs() < 1e-9);
     }
 

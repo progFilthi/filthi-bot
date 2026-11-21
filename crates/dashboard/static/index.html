@@ -79,6 +79,15 @@
              text-transform:uppercase;margin-bottom:3px}
   .kpi b{font-size:14px;font-variant-numeric:tabular-nums}
   .foot{margin:14px 0 6px;color:var(--dim);font-size:11px;text-align:center}
+  .hint{color:var(--dim);font-size:11px;margin:-4px 0 9px}
+  .banner{margin-top:12px;padding:10px 14px;border-radius:10px;
+          border:1px solid #432028;background:rgba(255,95,109,.08);
+          color:var(--red);font-size:12px}
+  .banner b{color:var(--red)}
+  .tiny.use{margin-left:4px;border-color:#2f5c8f;color:var(--blue)}
+  .tiny.use:hover{color:var(--blue);border-color:var(--blue)}
+  .rec{color:var(--dim);font-size:11px;margin-top:5px;min-height:14px}
+  .rec.warn{color:var(--amber)}
 
   /* --- order ticket --- */
   .seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
@@ -172,9 +181,12 @@
     </div>
   </header>
 
+  <div class="banner" id="market-banner" hidden></div>
+
   <div class="grid">
     <section class="card">
-      <h2><span>Entry scan</span><span class="muted" id="scan-age"></span></h2>
+      <h2><span>Signals</span><span class="muted" id="scan-age"></span></h2>
+      <div class="hint">What the strategy would do on the last closed bar. “Use plan” copies one into your order — it does not trade for you.</div>
       <div class="scroll">
         <table class="scan-table">
           <thead><tr>
@@ -187,7 +199,7 @@
     </section>
 
     <section class="card">
-      <h2><span>Manual order</span><span class="muted">demo · 0.01–0.10 lot</span></h2>
+      <h2><span>Your order</span><span class="muted" id="order-source">manual · 0.01–0.10 lot</span></h2>
       <div class="seg">
         <button class="buy on" id="seg-buy" type="button">BUY</button>
         <button class="sell" id="seg-sell" type="button">SELL</button>
@@ -203,6 +215,7 @@
         <button class="btn go" id="btn-confirm" type="button" disabled>Confirm</button>
       </div>
       <div class="msg" id="order-msg"></div>
+      <div class="rec" id="order-record"></div>
     </section>
   </div>
 
@@ -272,6 +285,7 @@ const barTime = t => { if (!t) return "—";
 const sign = v => v > 0 ? "up" : v < 0 ? "down" : "";
 
 let state = null;
+let marketClosed = false;
 
 function render(s){
   state = s;
@@ -287,6 +301,7 @@ function render(s){
   $("realised").textContent = money(perf.net);
   $("realised").className = sign(perf.net);
 
+  setMarket(s.market_open === false, s.broker_time);
   $("conn").className = "pill " + (s.connected ? "ok" : "bad");
   $("conn").title = s.server_time ? "terminal clock " + s.server_time.replace("T"," ").replace("Z"," UTC") : "";
   $("auto").className = "pill " + (s.autotrade ? "ok" : "bad");
@@ -299,7 +314,9 @@ function render(s){
   $("scan").innerHTML = rows.length ? rows.map(a => {
     const read = a.side
       ? `<span class="sig ${a.side}">${a.side.toUpperCase()}</span>
-         <span class="muted">stop ${num(a.stop)} · risk ${money(a.risk_per_lot*0.1)}</span>`
+         <span class="muted">stop ${num(a.stop)} · risk ${money(a.risk_per_lot*0.1)}</span>
+         <button class="tiny use" type="button" data-use="1" data-period="${a.period}"
+           data-side="${a.side}" data-stop="${a.stop}">Use plan</button>`
       : `<span class="muted"><span class="up">buy +${num(a.to_buy)}</span> · <span class="down">sell -${num(a.to_sell)}</span></span>`;
     return `<tr>
       <td class="tf" data-l="TF"><b>${a.period}</b></td>
@@ -308,7 +325,7 @@ function render(s){
       <td class="range muted" data-l="55 range">${num(a.lo)} – ${num(a.hi)}</td>
       <td class="muted ema300" data-l="ema300">${num(a.ema)} <span class="${a.uptrend?'up':'down'}">${a.uptrend?"↑":"↓"}</span></td>
       <td class="atr" data-l="atr">${num(a.atr)}</td>
-      <td class="muted next" data-l="next">${mmss(a.next_close_in)}</td>
+      <td class="muted next" data-l="next">${marketClosed ? "closed" : mmss(a.next_close_in)}</td>
       <td class="read" data-l="read">${read}</td>
     </tr>`;
   }).join("") : `<tr><td colspan="8" class="empty">no scan yet</td></tr>`;
@@ -317,7 +334,7 @@ function render(s){
   const pos = s.positions || [];
   $("pos-count").textContent = pos.length ? `${pos.length} open` : "";
   $("positions").innerHTML = pos.length ? pos.map(p => `
-    <div class="row"><label>${p.side.toUpperCase()} ${p.lots} lot · <span class="tag">${p.kind}</span></label>
+    <div class="row"><label>${p.side.toUpperCase()} ${p.lots} lot · <span class="tag">${p.comment || p.kind}</span></label>
       <b class="${sign(p.profit)}">${money(p.profit)}</b></div>
     <div class="row"><label>Entry</label><span>${num(p.entry)}</span></div>
     <div class="row"><label>Stop</label><span>${p.sl ? num(p.sl) + " · risk " + money(p.risk_usd) : '<span class="warn">none</span>'}</span></div>
@@ -358,7 +375,7 @@ function render(s){
     <div class="item">
       <span class="t">${(d.closed||"").slice(5,16).replace("T"," ")}</span>
       <span class="sig ${d.side}">${d.side.toUpperCase()}</span>
-      <span class="tag">${d.kind}</span>
+      <span class="tag">${d.tag || d.kind}</span>
       <span class="muted">${d.lots}</span>
       <span class="muted">${num(d.entry)} → ${num(d.exit)}</span>
       <span class="amt ${sign(d.profit)}">${money(d.profit)}</span>
@@ -435,6 +452,34 @@ function drawFeed(signals){
 /* ---------------- manual order ticket ---------------- */
 let side = "buy";
 let reviewed = null;
+let planSource = null;
+
+/// Historical, per timeframe, from the validation runs. Shown next to a plan so
+/// "is this winnable?" has an honest answer: an average over years, not a
+/// prediction about the next trade. Holds are the measured winner buckets.
+const RECORD = {
+  H4:  "H4 · PF 1.81 over 16 years · winners usually run 2–10 days",
+  H1:  "H1 · PF 1.32 over 16 years · winners usually run 9–60 hours",
+  M15: "M15 · PF 1.10 over 4 years · winners usually run 5–15 hours",
+  M5:  "M5 · not validated (1.4 years of data) — treat this one as a coin flip"
+};
+
+function setMarket(closed, brokerTime){
+  if (closed === marketClosed) return;
+  marketClosed = closed;
+  $("market-banner").hidden = !closed;
+  if (closed){
+    const t = (brokerTime || "").replace("T", " ").slice(0, 16);
+    $("market-banner").innerHTML = `<b>Market closed.</b> Last quote from the broker` +
+      (t ? ` was ${t}` : "") + `. Orders are disabled until quotes resume — normally Monday 01:00 server time.`;
+    invalidate();
+    orderMsg("", "");
+  } else {
+    $("btn-review").disabled = false;
+    $("order-preview").innerHTML =
+      "Review to see the exact stop, dollar risk and margin. Nothing is sent until you confirm.";
+  }
+}
 
 function setSide(s){
   side = s;
@@ -445,9 +490,15 @@ function setSide(s){
 
 function invalidate(){
   reviewed = null;
+  planSource = null;
   $("btn-confirm").disabled = true;
-  $("order-preview").innerHTML =
-    "Review to see the exact stop, dollar risk and margin. Nothing is sent until you confirm.";
+  $("btn-review").disabled = marketClosed;
+  $("order-source").textContent = "manual · 0.01–0.10 lot";
+  $("order-record").textContent = "";
+  $("order-record").className = "rec";
+  $("order-preview").innerHTML = marketClosed
+    ? "Market closed — orders are disabled until quotes resume."
+    : "Review to see the exact stop, dollar risk and margin. Nothing is sent until you confirm.";
 }
 
 function orderMsg(text, cls){
@@ -469,6 +520,7 @@ async function postJSON(path, body){
 
 async function review(){
   orderMsg("", "");
+  if (marketClosed) return orderMsg("the market is closed — orders are disabled", "err");
   if (!state || !state.price) return orderMsg("no live price yet — wait for the terminal", "err");
   const lots = parseFloat($("f-lots").value);
   const stopUsd = parseFloat($("f-stop").value);
@@ -480,19 +532,26 @@ async function review(){
   const tp = isFinite(tpUsd) && tpUsd > 0 ? (side === "buy" ? px + tpUsd : px - tpUsd) : null;
 
   $("btn-review").disabled = true;
-  const res = await postJSON("/api/order", { side, lots, sl, tp, confirm: false });
-  $("btn-review").disabled = false;
+  const body = { side, lots, sl, tp, confirm: false };
+  if (planSource) body.source = planSource;
+  const res = await postJSON("/api/order", body);
+  $("btn-review").disabled = marketClosed;
 
   if (!res.ok){ reviewed = null; $("btn-confirm").disabled = true;
     return orderMsg(res.error || "review failed", "err"); }
 
   const d = res.data;
-  reviewed = { side, lots: d.lots, sl: d.sl, tp: d.tp, confirm: true };
+  reviewed = { side, lots: d.lots, sl: d.sl, tp: d.tp, confirm: true,
+               source: planSource || null };
+  const plan = planSource
+    ? `<br><span class="muted">copied from the ${planSource} signal — still counted as your manual trade</span>`
+    : "";
   $("order-preview").innerHTML =
     `<b class="${side === "buy" ? "up" : "down"}">${side.toUpperCase()}</b> <b>${d.lots}</b> lot · ` +
     `fills near <b>${num(d.entry)}</b> (spread ${d.spread_pts.toFixed(0)} pts)<br>` +
     `stop <b>${num(d.sl)}</b> — ${d.stop_points.toFixed(0)} pts · ${money(d.stop_usd)} away<br>` +
-    `risk <b>${money(d.risk_usd)}</b> · margin <b>${money(d.margin)}</b> · free after ${money(d.margin_free)}`;
+    `risk <b>${money(d.risk_usd)}</b> · margin <b>${money(d.margin)}</b> · free after ${money(d.margin_free)}` +
+    plan;
   $("btn-confirm").disabled = false;
   orderMsg("reviewed — press Confirm to send", "");
 }
@@ -535,6 +594,25 @@ async function loadState(){
   try { render(await (await fetch("/api/state")).json()); } catch(_){}
 }
 
+async function usePlan(period, wantSide, stop){
+  if (marketClosed) {
+    return orderMsg("market is closed — nothing can be sent until quotes resume", "err");
+  }
+  if (!state || !state.price) return orderMsg("no live price yet", "err");
+  setSide(wantSide);
+  const dist = Math.abs(state.price - stop);
+  $("f-stop").value = (Math.round(dist * 10) / 10).toFixed(1);
+  planSource = period;
+  $("order-source").textContent = `${period} plan · still manual`;
+  $("order-record").textContent = RECORD[period] || "";
+  $("order-record").className = "rec" + (period === "M5" ? " warn" : "");
+  await review();
+}
+
+$("scan").addEventListener("click", e => {
+  const b = e.target.closest("button[data-use]");
+  if (b) usePlan(b.dataset.period, b.dataset.side, parseFloat(b.dataset.stop));
+});
 $("seg-buy").addEventListener("click", () => setSide("buy"));
 $("seg-sell").addEventListener("click", () => setSide("sell"));
 ["f-lots","f-stop","f-tp"].forEach(id => $(id).addEventListener("input", invalidate));
