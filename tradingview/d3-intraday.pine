@@ -1,0 +1,102 @@
+//@version=6
+// D3 intraday — Donchian 55 breakout, day session only.
+//
+// Mirrors docs/daytrading-variant.md:
+//   entry  close outside the previous 55 hourly highs/lows, in the EMA300
+//          direction, only when the bar closes 07:00–18:00 UTC
+//   stop   1.5 x ATR(14) from the entry price
+//   trail  2.5 x ATR(14), ratcheting, updated at each bar close
+//   flat   at the close of the day's last bar (21:00 UTC by default)
+//
+// Chart: XAUUSD, 1 hour. Nothing is held overnight.
+//
+// Known differences from the repo engine, both small:
+//   * this fills at the signal bar's close; the engine fills at the next
+//     bar's open
+//   * TradingView fills a stop the moment price touches it; the engine
+//     assumes stop-before-target within a bar, which is the same pessimism
+strategy(
+     title                   = "D3 intraday — Donchian 55",
+     overlay                 = true,
+     initial_capital         = 25000,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 10,
+     commission_type         = strategy.commission.cash_per_order,
+     commission_value        = 0,
+     slippage                = 10,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false,
+     pyramiding              = 0)
+
+// ---------------- inputs ----------------
+lb        = input.int(55,   "Donchian lookback",            minval = 2,   group = "Rule")
+emaLen    = input.int(300,  "Trend EMA",                    minval = 2,   group = "Rule")
+atrLen    = input.int(14,   "ATR length",                   minval = 1,   group = "Rule")
+slMult    = input.float(1.5,"Stop = x ATR",                 step = 0.1,   group = "Rule")
+trailMult = input.float(2.5,"Trail = x ATR",                step = 0.1,   group = "Rule")
+
+fromH     = input.int(7,    "First entry hour (UTC)",       minval = 0, maxval = 23, group = "Session")
+toH       = input.int(18,   "Last entry hour (UTC)",        minval = 0, maxval = 23, group = "Session")
+flatH     = input.int(21,   "Day's last bar closes (UTC)",  minval = 0, maxval = 23, group = "Session")
+flatOn    = input.bool(true,"Flatten every day",                          group = "Session")
+
+showZone  = input.bool(true, "Shade the entry window",                    group = "Display")
+
+// ---------------- indicators ----------------
+emaTrend = ta.ema(close, emaLen)
+atr      = ta.atr(atrLen)
+hiPrev   = ta.highest(high, lb)[1]
+loPrev   = ta.lowest(low, lb)[1]
+
+// The hour this bar closes — the hour an order placed here would fill.
+barMs     = timeframe.in_seconds() * 1000
+closeHour = hour(time + barMs, "UTC")
+
+inWindow = closeHour >= fromH and closeHour <= toH
+dayClose = flatOn and closeHour == flatH
+
+longSig  = close > hiPrev and close > emaTrend
+shortSig = close < loPrev and close < emaTrend
+
+// ---------------- state ----------------
+var float stopLvl = na
+var float bestPx  = na
+
+if strategy.position_size == 0
+    stopLvl := na
+    bestPx  := na
+
+// ---------------- entries ----------------
+if strategy.position_size == 0 and inWindow
+    if longSig
+        strategy.entry("L", strategy.long)
+    else if shortSig
+        strategy.entry("S", strategy.short)
+
+// ---------------- stop and trail ----------------
+// Seed the initial stop once the position exists, then ratchet it.
+if strategy.position_size != 0 and na(stopLvl)
+    stopLvl := strategy.position_avg_price + (strategy.position_size > 0 ? -slMult : slMult) * atr
+    bestPx  := strategy.position_avg_price
+
+if strategy.position_size > 0
+    bestPx  := math.max(bestPx, high)
+    stopLvl := math.max(stopLvl, bestPx - trailMult * atr)
+else if strategy.position_size < 0
+    bestPx  := math.min(bestPx, low)
+    stopLvl := math.min(stopLvl, bestPx + trailMult * atr)
+
+if strategy.position_size != 0
+    strategy.exit("stop", stop = stopLvl)
+
+// ---------------- daily flat ----------------
+if dayClose and strategy.position_size != 0
+    strategy.close_all(comment = "day close")
+
+// ---------------- display ----------------
+plot(emaTrend, "EMA300", color = color.new(color.orange, 0), linewidth = 2)
+plot(hiPrev,   "55-bar high", color = color.new(color.teal, 40))
+plot(loPrev,   "55-bar low",  color = color.new(color.maroon, 40))
+plot(strategy.position_size != 0 ? stopLvl : na, "stop",
+     color = color.new(color.red, 0), style = plot.style_linebr, linewidth = 2)
+bgcolor(showZone and inWindow ? color.new(color.teal, 94) : na)

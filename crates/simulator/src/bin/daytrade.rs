@@ -21,6 +21,7 @@ use anyhow::Context;
 use xau_core::{Bar, Side};
 use xau_data::read_bars_parquet;
 use xau_sim::engine::{backtest, EngineConfig, Metrics};
+use xau_sim::orb::ymd_hms;
 use xau_sim::strategy::{entry_signals, StratKind, StratParams};
 
 fn arg(name: &str) -> Option<String> {
@@ -66,7 +67,14 @@ fn main() -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("parquet not found: {}", path.display());
     }
-    let bars = read_bars_parquet(path).context("reading parquet")?;
+    let mut bars = read_bars_parquet(path).context("reading parquet")?;
+    // `--last-bars` reproduces the window a TradingView chart actually shows,
+    // so a Pine version can be checked against the same slice.
+    if let Some(n) = arg("last-bars").and_then(|v| v.parse::<usize>().ok()) {
+        if n > 0 && n < bars.len() {
+            bars = bars[bars.len() - n..].to_vec();
+        }
+    }
     let params = StratParams { lookback: 55, trend_ma: 300, ..Default::default() };
     let sig = entry_signals(&bars, StratKind::Donchian, &params);
 
@@ -307,6 +315,28 @@ fn main() -> anyhow::Result<()> {
                 m20.total_pnl,
                 m40.total_pnl,
                 m20.avg_bars_held
+            );
+        }
+    }
+
+    // A short trade list, for checking a TradingView run trade by trade.
+    if let Some(n) = arg("list-trades").and_then(|v| v.parse::<usize>().ok()) {
+        let mut cfg = d3_config();
+        cfg.allowed_hours = (7..=18).collect();
+        cfg.flat_before_gap_min = Some(90);
+        let rep = backtest(&bars, &sig, &cfg);
+        println!("\nlast {n} trades, 07–18 UTC + day close:");
+        println!("{:<18}{:>6}{:>10}{:>10}{:>7}{:>10}", "entry (UTC)", "side", "entry", "exit", "reason", "pnl");
+        for t in rep.trades.iter().rev().take(n).rev() {
+            let (y, m, d, h, mi) = ymd_hms(bars[t.entry_bar].ts);
+            println!(
+                "{:<18}{:>6}{:>10.2}{:>10.2}{:>7}{:>10.0}",
+                format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}"),
+                if t.side == Side::Buy { "buy" } else { "sell" },
+                t.entry,
+                t.exit,
+                t.reason.label(),
+                t.pnl
             );
         }
     }
