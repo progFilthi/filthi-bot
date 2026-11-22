@@ -63,6 +63,16 @@ struct Args {
     /// Halt when equity falls this percent below the starting balance.
     #[arg(long, default_value_t = 25.0)]
     max_drawdown_pct: f64,
+    /// Trade the intraday variant: entries only inside the UTC window, and
+    /// flat before the daily break. No overnight exposure.
+    #[arg(long)]
+    intraday: bool,
+    /// First UTC hour an entry may fill (with --intraday).
+    #[arg(long, default_value_t = 7)]
+    entry_from: u32,
+    /// Last UTC hour an entry may fill (with --intraday).
+    #[arg(long, default_value_t = 18)]
+    entry_to: u32,
     #[arg(long, default_value = "http://127.0.0.1:22346/mcp")]
     url: String,
     /// Bearer token. Defaults to $MT5_MCP_TOKEN, then the token file.
@@ -119,6 +129,9 @@ struct Ctx {
     max_drawdown_pct: f64,
     adopt_any: bool,
     manual_sig: Option<String>,
+    intraday: bool,
+    entry_from: u32,
+    entry_to: u32,
 }
 
 impl Ctx {
@@ -198,9 +211,12 @@ fn scan(m: &mut Mcp) -> Result<()> {
         let atrs = atr(&closed, ATR_PERIOD);
         let a = atrs[i];
 
-        let when = chrono::DateTime::from_timestamp(bar.ts, 0)
+        // The terminal stamps bars with the broker's clock; show true UTC.
+        let when = chrono::DateTime::from_timestamp(server_to_utc(bar.ts), 0)
             .map(|d| d.format("%m-%d %H:%M").to_string())
             .unwrap_or_default();
+        let fill_hour = utc_hour_of(bar.ts + per);
+        let window = if in_entry_window(fill_hour) { "open" } else { "shut" };
 
         let read = match sig {
             Some(s) => {
@@ -208,17 +224,19 @@ fn scan(m: &mut Mcp) -> Result<()> {
                 let stop = round2(bar.close - dir * SL_ATR * a);
                 let risk = (bar.close - stop).abs();
                 format!(
-                    "SIGNAL {} — stop {stop:.2} ({risk:.2} = {:.0} pts, no TP)",
+                    "SIGNAL {} — stop {stop:.2} ({risk:.2} = {:.0} pts, no TP) · window {window} (next bar {:02}:00 UTC)",
                     s.as_str(),
-                    risk / 0.01
+                    risk / 0.01,
+                    fill_hour
                 )
             }
             None => {
                 let gate = if bar.close > trend[i] { "uptrend" } else { "downtrend" };
                 format!(
-                    "no breakout ({gate}; needs +{:.2} to buy / -{:.2} to sell)",
+                    "no breakout ({gate}; needs +{:.2} to buy / -{:.2} to sell) · window {window} (next bar {:02}:00 UTC)",
                     hi[i] - bar.close,
-                    bar.close - lo[i]
+                    bar.close - lo[i],
+                    fill_hour
                 )
             }
         };
@@ -403,6 +421,28 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
             return Ok(true);
         }
 
+        // Intraday rule: nothing is carried past the day's last bar.
+        if ctx.intraday && is_day_last_bar(bar.ts, ctx.bar_secs) {
+            ctx.log(
+                "day_close",
+                &[("side", json!(p.side)), ("entry", json!(p.entry)),
+                  ("sl", json!(p.sl)), ("bars", json!(p.bars_held)),
+                  ("note", json!("flat before the daily break; no overnight hold"))],
+            );
+            if !ctx.dry_run {
+                let r = ctx.mcp.call(
+                    "trade_close_single_position",
+                    json!({ "symbol": SYMBOL, "position_ticket": p.position_id }),
+                )?;
+                ctx.log("day_close_filled", &[("retcode", r["retcode"].clone())]);
+            }
+            state.position = None;
+            state.closed_trades += 1;
+            state.last_bar_ts = bar.ts;
+            ctx.save(state)?;
+            return Ok(true);
+        }
+
         if atr_now.is_finite() && atr_now > 0.0 {
             let buy = p.side == "buy";
             p.best = if buy { p.best.max(bar.high) } else { p.best.min(bar.low) };
@@ -454,6 +494,12 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
     let trend = ema(&closes, TREND_MA);
     let i = closed.len() - 1;
 
+    // The fill happens at the open of the next bar, so the hour that matters
+    // is the one after this closed bar — in UTC, not on the broker's clock.
+    let fill_ts = bar.ts + ctx.bar_secs;
+    let fill_hour = utc_hour_of(fill_ts);
+    let window_ok = !ctx.intraday || (fill_hour >= ctx.entry_from && fill_hour <= ctx.entry_to);
+
     match sig {
         None => {
             ctx.log(
@@ -461,6 +507,14 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
                 &[("close", json!(round2(closes[i]))), ("hi", json!(round2(hi[i]))),
                   ("lo", json!(round2(lo[i]))), ("ema", json!(round2(trend[i]))),
                   ("atr", json!(round2(atr_now)))],
+            );
+        }
+        Some(_) if !window_ok => {
+            ctx.log(
+                "signal_outside_window",
+                &[("fill_hour_utc", json!(fill_hour)),
+                  ("window", json!(format!("{:02}–{:02} UTC", ctx.entry_from, ctx.entry_to))),
+                  ("note", json!("breakout is real but the intraday rule does not enter here"))],
             );
         }
         Some(side) => {
@@ -561,6 +615,9 @@ fn main() -> Result<()> {
         max_drawdown_pct: args.max_drawdown_pct,
         adopt_any: args.adopt_any,
         manual_sig: None,
+        intraday: args.intraday,
+        entry_from: args.entry_from,
+        entry_to: args.entry_to,
     };
 
     let mut state = ctx.load();
@@ -572,7 +629,11 @@ fn main() -> Result<()> {
     ctx.log(
         "runner_start",
         &[("period", json!(args.period)), ("lots", json!(args.lots)),
-          ("dry_run", json!(args.dry_run)), ("state", json!(ctx.state_path.display().to_string()))],
+          ("dry_run", json!(args.dry_run)), ("state", json!(ctx.state_path.display().to_string())),
+          ("intraday", json!(args.intraday)),
+          ("entry_window_utc", json!(if args.intraday {
+              format!("{:02}–{:02}", args.entry_from, args.entry_to)
+          } else { "all hours".to_string() }))],
     );
 
     loop {

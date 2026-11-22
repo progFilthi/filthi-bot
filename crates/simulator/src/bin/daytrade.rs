@@ -224,6 +224,49 @@ fn main() -> anyhow::Result<()> {
         println!("{:>7}/{}", pos, folds);
     }
 
+    println!("\nwalk-forward: pick the entry window on earlier folds, trade the next");
+    let grid: [(u32, u32); 6] = [(6, 17), (7, 16), (7, 18), (8, 19), (9, 20), (13, 18)];
+    let pnl_by_fold = |from: u32, to: u32| -> Vec<f64> {
+        let mut cfg = d3_config();
+        cfg.allowed_hours = (from..=to).collect();
+        cfg.flat_before_gap_min = Some(90);
+        let rep = backtest(&bars, &sig, &cfg);
+        let mut sums = vec![0.0f64; folds];
+        for t in &rep.trades {
+            let f = (t.entry_bar / fold_size).min(folds - 1);
+            sums[f] += t.pnl;
+        }
+        sums
+    };
+    let grid_pnl: Vec<Vec<f64>> = grid.iter().map(|(a, b)| pnl_by_fold(*a, *b)).collect();
+    let mut oos_total = 0.0;
+    let mut oos_folds = 0usize;
+    for k in 1..folds {
+        let best = (0..grid.len())
+            .max_by(|a, b| {
+                let sa: f64 = grid_pnl[*a][..k].iter().sum();
+                let sb: f64 = grid_pnl[*b][..k].iter().sum();
+                sa.partial_cmp(&sb).unwrap()
+            })
+            .unwrap();
+        let (f, t) = grid[best];
+        let got = grid_pnl[best][k];
+        oos_total += got;
+        if got > 0.0 {
+            oos_folds += 1;
+        }
+        println!(
+            "  test fold {}: picked {:02}–{:02} UTC on folds 1–{} → {:+8.0}",
+            k + 1, f, t, k, got
+        );
+    }
+    println!(
+        "  out-of-sample total {:+0.0} across {} folds, {} positive",
+        oos_total,
+        folds - 1,
+        oos_folds
+    );
+
     // ---- Scalping: the same signal, tiny stops and targets ----
     let m15 = arg("m15").unwrap_or_else(|| "data/cache_long/xauusd_m15.parquet".into());
     let m15_path = Path::new(&m15);

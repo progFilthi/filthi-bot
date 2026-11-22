@@ -198,14 +198,20 @@
   <div class="grid">
     <section class="card">
       <h2><span>Signals</span><span class="muted" id="scan-age"></span></h2>
-      <div class="hint">What the strategy would do on the last closed bar. “Use plan” copies one into your order — it does not trade for you.</div>
+      <div class="hint">
+        One rule: a close outside the last 55 hourly bars, in the EMA300 direction.
+        Entries are only taken when the next bar opens inside <b>07:00–18:00 UTC</b>,
+        and every position is closed before the daily break. A signal outside that
+        window is real but not tradeable — the Window column says which.
+        “Use plan” copies one into your order; it does not trade for you.
+      </div>
       <div class="scroll">
         <table class="scan-table">
           <thead><tr>
-            <th>TF</th><th>Last closed</th><th>Close</th><th>55 range</th>
-            <th>EMA300</th><th>ATR</th><th>Next bar</th><th>Read</th>
+            <th>TF</th><th>Last closed (UTC)</th><th>Close</th><th>55 range</th>
+            <th>EMA300</th><th>ATR</th><th>Next bar</th><th>Window</th><th>Read</th>
           </tr></thead>
-          <tbody id="scan"><tr><td colspan="8" class="empty">waiting for terminal…</td></tr></tbody>
+          <tbody id="scan"><tr><td colspan="9" class="empty">waiting for terminal…</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -241,29 +247,22 @@
           </tr></thead>
           <tbody>
             <tr>
-              <td><b>H1</b></td>
-              <td data-l="checks">once per closed H1 bar, at :00 server time</td>
-              <td data-l="enters">close outside the last 55 hourly bars, and only in the EMA300 direction</td>
+              <td><b>H1</b><br><span class="muted">intraday</span></td>
+              <td data-l="checks">once per closed H1 bar (on the hour)</td>
+              <td data-l="enters">close outside the last 55 hourly bars, in the EMA300 direction, <b>and only when the next bar opens 07:00–18:00 UTC</b></td>
               <td data-l="stop">1.5 × ATR(14) at entry</td>
-              <td data-l="exit">trail 2.5 × ATR · hard cap 240 bars (≈10 trading days)</td>
-              <td data-l="size">0.01 lot ≈ $40–60 risk</td>
-            </tr>
-            <tr>
-              <td><b>H4</b></td>
-              <td data-l="checks">once per closed H4 bar, at 00/04/08/12/16/20</td>
-              <td data-l="enters">close outside the last 55 four-hour bars, and only in the EMA300 direction</td>
-              <td data-l="stop">1.5 × ATR(14) at entry</td>
-              <td data-l="exit">trail 2.5 × ATR · hard cap 240 bars (≈40 trading days)</td>
-              <td data-l="size">0.10 lot ≈ $500–650 risk · stopped</td>
+              <td data-l="exit">trail 2.5 × ATR, and <b>flat at the daily close</b> — nothing is held overnight</td>
+              <td data-l="size">0.01 lot ≈ $30–60 risk</td>
             </tr>
           </tbody>
         </table>
       </div>
       <div class="hint" style="margin:9px 0 0">
         No take profit — tested, and a fixed target cut the winners that pay for everything.
-        The exit is the trailing stop, or the bar cap if the trade goes nowhere.
-        One position per track, no re-entry while it is open. These are opened by the
+        The exit is the trailing stop, or the daily close if the trade is still running.
+        One position at a time, no re-entry while it is open. These are opened by the
         runner process; anything you send from “Your order” is manual.
+        <b>The H1 intraday rule is the only strategy running.</b>
       </div>
     </section>
   </div>
@@ -300,18 +299,6 @@
         <div class="row"><label>Test / experiment trades</label><span id="p-test">—</span></div>
         <div class="row"><label>Best / worst trade</label><span id="p-bw">—</span></div>
       </div>
-    </section>
-  </div>
-
-  <div class="grid">
-    <section class="card wide">
-      <h2><span>Paper log — London breakout</span><span class="muted" id="orb-status">no log yet</span></h2>
-      <div class="hint" style="margin:-2px 0 10px">
-        A second rule, tested but not trusted: first break of the <b>08:00–13:00 London</b> box,
-        entries only in the next 60 minutes, 45-minute swing stop, 2R target, flat by 19:00 London.
-        The logger records signals and hypothetical results — it never places an order.
-      </div>
-      <div id="orb-body"><div class="empty">waiting for the paper logger…</div></div>
     </section>
   </div>
 
@@ -379,17 +366,21 @@ function render(s){
          <button class="tiny use" type="button" data-use="1" data-period="${a.period}"
            data-side="${a.side}" data-stop="${a.stop}">Use plan</button>`
       : `<span class="muted"><span class="up">buy +${num(a.to_buy)}</span> · <span class="down">sell -${num(a.to_sell)}</span></span>`;
+    const win = a.window_open
+      ? `<span class="pill ok">open</span>`
+      : `<span class="pill">shut</span> <span class="muted">${String(a.fill_hour_utc).padStart(2,"0")}:00</span>`;
     return `<tr>
       <td class="tf" data-l="TF"><b>${a.period}</b></td>
-      <td class="muted closed" data-l="closed">${barTime(a.bar_ts)}</td>
+      <td class="muted closed" data-l="closed">${barTime(a.bar_ts_utc)}</td>
       <td class="close" data-l="close">${num(a.close)}</td>
       <td class="range muted" data-l="55 range">${num(a.lo)} – ${num(a.hi)}</td>
       <td class="muted ema300" data-l="ema300">${num(a.ema)} <span class="${a.uptrend?'up':'down'}">${a.uptrend?"↑":"↓"}</span></td>
       <td class="atr" data-l="atr">${num(a.atr)}</td>
       <td class="muted next" data-l="next">${marketClosed ? "closed" : mmss(a.next_close_in)}</td>
+      <td class="win" data-l="window">${win}</td>
       <td class="read" data-l="read">${read}</td>
     </tr>`;
-  }).join("") : `<tr><td colspan="8" class="empty">no scan yet</td></tr>`;
+  }).join("") : `<tr><td colspan="9" class="empty">no scan yet</td></tr>`;
 
   // --- positions ---
   const pos = s.positions || [];
@@ -462,93 +453,6 @@ async function loadHistory(){
     drawChart(h.equity || []);
     drawFeed(h.signals || []);
   }catch(e){ /* keep the last good chart */ }
-}
-
-// --- London breakout paper log ---------------------------------------------
-// The rule is not traded here; the logger writes board.json and we only show
-// it. Everything on this card is hypothetical.
-async function loadOrb(){
-  try{
-    const r = await (await fetch("/api/orb")).json();
-    renderOrb(r.board);
-  }catch(_){ /* keep the last board */ }
-}
-
-function renderOrb(b){
-  const el = $("orb-body");
-  const status = $("orb-status");
-  if (!b){
-    el.innerHTML = `<div class="empty">paper logger has not run yet</div>`;
-    status.textContent = "no log yet";
-    status.className = "muted";
-    return;
-  }
-  const s = b.session || {};
-  const f = b.forward || {};
-  const live = b.market_open;
-  status.textContent = live
-    ? `live · last bar ${(b.last_bar_utc || "").slice(11)} UTC`
-    : `idle · feed ${Math.round(b.feed_minutes_behind || 0)}m behind`;
-  status.className = live ? "pill ok" : "pill";
-
-  const phaseClass = {
-    in_trade: "warn", waiting: "up", pre_session: "up", closed: "muted",
-    no_entry: "muted", skipped: "muted", idle: "muted"
-  }[s.phase] || "muted";
-  const t = s.ticket;
-  const box = s.box;
-  const w = s.session_utc || {};
-
-  const plan = t
-    ? `<span class="sig ${t.side}">${t.side.toUpperCase()}</span>
-       entry <b>${num(t.entry)}</b> · stop ${num(t.stop)} · target ${num(t.target)}
-       · ${num(t.lots,2)} lot · risk ${money(t.risk_usd_at_lots)}`
-    : `<span class="muted">${s.reason || "—"}</span>`;
-
-  const outcome = s.result_r != null
-    ? `<span class="${sign(s.result_r)}">${num(s.result_r,2)}R</span>`
-    : (s.open_r != null ? `<span class="${sign(s.open_r)}">${num(s.open_r,2)}R open</span>`
-                        : `<span class="muted">—</span>`);
-
-  const recent = (b.recent || []).map(x => `
-    <tr>
-      <td class="muted">${x.date}</td>
-      <td><span class="sig ${x.side}">${x.side.toUpperCase()}</span></td>
-      <td class="muted">${x.exit_kind}</td>
-      <td class="${sign(x.r)}">${num(x.r,2)}R</td>
-      <td class="${sign(x.pnl_usd)}">${money(x.pnl_usd)}</td>
-      <td class="muted">${num(x.lots,2)}</td>
-      <td class="muted">${money(x.equity_after)}</td>
-    </tr>`).join("");
-
-  el.innerHTML = `
-    <div class="kpis" style="margin-bottom:10px">
-      <div class="kpi"><label>logged</label><b>${f.trades ?? 0}</b></div>
-      <div class="kpi"><label>live / backfill</label><b>${f.live_trades ?? 0} / ${f.backfilled_trades ?? 0}</b></div>
-      <div class="kpi"><label>win rate</label><b>${pct(f.win_rate)}</b></div>
-      <div class="kpi"><label>expectancy</label><b class="${sign(f.expectancy_r)}">${num(f.expectancy_r,2)}R</b></div>
-      <div class="kpi"><label>profit factor</label><b>${f.profit_factor == null ? "—" : num(f.profit_factor,2)}</b></div>
-      <div class="kpi"><label>net</label><b class="${sign(f.net_usd)}">${money(f.net_usd)}</b></div>
-      <div class="kpi"><label>paper equity</label><b>${money(f.equity)}</b></div>
-      <div class="kpi"><label>max drawdown</label><b class="down">${num(f.max_drawdown_pct,1)}%</b></div>
-    </div>
-    <div class="row"><label>Session</label>
-      <span>${s.date || "—"} · <b class="${phaseClass}">${s.phase || "—"}</b>
-      ${s.is_current_day ? "" : '<span class="tag">last session</span>'}</span></div>
-    <div class="row"><label>Box</label>
-      <span class="muted">${box ? `high ${num(box.high)} · low ${num(box.low)} · ${num(box.height)} range · ${box.bars} bars` : "not formed yet"}</span></div>
-    <div class="row"><label>Window (UTC)</label>
-      <span class="muted">box ${w.box_start || "—"}–${w.box_end || "—"} · entries to ${w.entry_until || "—"} · flat ${w.flat || "—"}</span></div>
-    <div class="row"><label>Plan</label><span>${plan}</span></div>
-    <div class="row"><label>Result</label><span>${outcome}</span></div>
-    ${b.next_session ? `<div class="row"><label>Next box</label><span class="muted">${b.next_session.date} · ${b.next_session.box_start_utc}–${b.next_session.box_end_utc} UTC</span></div>` : ""}
-    ${recent ? `<div class="scroll" style="margin-top:10px"><table>
-      <thead><tr><th>Date</th><th>Side</th><th>Exit</th><th>R</th><th>P/L</th><th>Lots</th><th>Equity</th></tr></thead>
-      <tbody>${recent}</tbody></table></div>` : `<div class="empty">no closed paper trades yet</div>`}
-    <div class="hint" style="margin:9px 0 0">
-      Since ${f.since || "—"} · ${f.signals || 0} signals · expectancy needs ~40 live trades
-      before it means anything · worst day ${pct(f.worst_day_pct)} · ${f.max_losing_streak || 0} losses in a row
-    </div>`;
 }
 
 function drawChart(points){
@@ -777,8 +681,8 @@ es.onerror = () => { $("conn").className = "pill bad"; };
 
 loadHistory();
 setInterval(loadHistory, 30000);
-loadOrb();
-setInterval(loadOrb, 30000);
+// Don't wait for the next server broadcast to show something.
+loadState();
 </script>
 </body>
 </html>

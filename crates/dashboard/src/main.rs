@@ -634,7 +634,8 @@ impl App {
     }
 
     fn tracks(&self) -> Vec<Track> {
-        ["H1", "H4"]
+        // The intraday rule runs on H1 only; H4 is retired.
+        ["H1"]
             .iter()
             .map(|p| {
                 let lower = p.to_lowercase();
@@ -948,29 +949,6 @@ async fn api_history(State(app): State<Arc<App>>) -> impl IntoResponse {
     ([("content-type", "application/json")], app.history())
 }
 
-/// The paper logger writes one file; serve it as-is rather than duplicating
-/// the rule in the dashboard. Missing file simply means it has not run yet.
-async fn api_orb(State(app): State<Arc<App>>) -> impl IntoResponse {
-    let path = app.root.join("runs/orb/board.json");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(board) => (StatusCode::OK, axum::Json(json!({ "ok": true, "board": board }))),
-            Err(e) => (
-                StatusCode::OK,
-                axum::Json(json!({ "ok": false, "board": null, "error": format!("unreadable board: {e}") })),
-            ),
-        },
-        Err(_) => (
-            StatusCode::OK,
-            axum::Json(json!({
-                "ok": true,
-                "board": null,
-                "error": "paper logger has not written a board yet"
-            })),
-        ),
-    }
-}
-
 async fn api_health(State(app): State<Arc<App>>) -> impl IntoResponse {
     let ok = app.snap.read().map(|s| s.connected).unwrap_or(false);
     let code = if ok {
@@ -984,11 +962,15 @@ async fn api_health(State(app): State<Arc<App>>) -> impl IntoResponse {
 async fn api_stream(
     State(app): State<Arc<App>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // Send what we already have straight away. Without this a page opened
+    // between polls sits on its placeholders until the next broadcast.
+    let current = app.body.read().map(|b| b.clone()).unwrap_or_default();
     let rx = app.tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
+    let live = BroadcastStream::new(rx).filter_map(|msg| match msg {
         Ok(s) => Some(Ok(Event::default().event("snapshot").data(s))),
         Err(_) => None,
     });
+    let stream = tokio_stream::once(Ok(Event::default().event("snapshot").data(current))).chain(live);
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -997,7 +979,6 @@ fn router(app: Arc<App>) -> Router {
         .route("/", get(index))
         .route("/api/state", get(api_state))
         .route("/api/history", get(api_history))
-        .route("/api/orb", get(api_orb))
         .route("/api/stream", get(api_stream))
         .route("/healthz", get(api_health))
         .route("/api/order", post(api_order))

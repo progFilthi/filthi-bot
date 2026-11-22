@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use xau_core::{Bar, Side};
+use xau_sim::orb::eu_dst_active;
 use xau_sim::strategy::{atr, donchian, ema, entry_signals, StratKind, StratParams};
 
 use crate::mcp::Mcp;
@@ -24,8 +25,9 @@ pub const MAX_HOLD_BARS: usize = 240;
 pub const SYMBOL: &str = "XAUUSD";
 pub const CONTRACT: f64 = 100.0;
 
-/// Timeframes the dashboard shows, fastest first.
-pub const SCAN_PERIODS: [&str; 4] = ["M5", "M15", "H1", "H4"];
+/// Timeframes the dashboard shows. Only the traded one: the page is a
+/// control panel for one rule, not a market scanner.
+pub const SCAN_PERIODS: [&str; 1] = ["H1"];
 
 pub fn period_secs(p: &str) -> Result<i64> {
     Ok(match p {
@@ -38,6 +40,48 @@ pub fn period_secs(p: &str) -> Result<i64> {
         "D1" => 86400,
         other => bail!("unsupported period {other}"),
     })
+}
+
+// --- intraday overlay -------------------------------------------------------
+/// Entries are only taken when the *next* bar opens inside this UTC hour
+/// range. The validated intraday variant uses 07–18 UTC: London open through
+/// the New York afternoon.
+pub const ENTRY_FROM_UTC: u32 = 7;
+pub const ENTRY_TO_UTC: u32 = 18;
+
+/// The broker's clock is UTC+2, and one hour more while EU summer time is in
+/// force (the broker and the EU switch on the same dates).
+pub fn server_offset_s(ts_server: i64) -> i64 {
+    7_200 + if eu_dst_active(ts_server.div_euclid(86_400)) { 3_600 } else { 0 }
+}
+
+/// Broker wall clock → true UTC.
+///
+/// The terminal has no UTC: every bar it returns is stamped with the broker's
+/// own clock. The backtest data was converted before import, so anything the
+/// live path compares against UTC — the entry window, above all — has to
+/// convert too. A fixed −2h shift would be right in winter and an hour wrong
+/// for half the year.
+pub fn server_to_utc(ts_server: i64) -> i64 {
+    ts_server - server_offset_s(ts_server)
+}
+
+/// UTC hour (0–23) of a broker-stamped timestamp.
+pub fn utc_hour_of(ts_server: i64) -> u32 {
+    (server_to_utc(ts_server).rem_euclid(86_400) / 3_600) as u32
+}
+
+/// True when this bar is the last one before the daily maintenance break.
+///
+/// The break starts at 23:00 server, so the bar whose *close* lands on 23:00
+/// is the last tradeable one. Comparing in server time keeps DST out of it;
+/// the same bar is 20:00 UTC in winter and 19:00 in summer.
+pub fn is_day_last_bar(ts_server: i64, period_secs: i64) -> bool {
+    (ts_server + period_secs).rem_euclid(86_400) / 60 == 23 * 60
+}
+
+pub fn in_entry_window(hour_utc: u32) -> bool {
+    hour_utc >= ENTRY_FROM_UTC && hour_utc <= ENTRY_TO_UTC
 }
 
 pub fn strategy_params() -> StratParams {
@@ -176,6 +220,9 @@ pub fn field(p: &Value, k: &str) -> String {
 pub struct Analysis {
     pub period: String,
     pub bar_ts: i64,
+    /// The same bar on the true UTC clock, for display. `bar_ts` stays on the
+    /// broker clock so countdowns keep working.
+    pub bar_ts_utc: i64,
     pub bars: usize,
     pub close: f64,
     pub hi: f64,
@@ -194,6 +241,11 @@ pub struct Analysis {
     pub risk_per_lot: f64,
     /// Seconds until this timeframe's next bar closes.
     pub next_close_in: i64,
+    /// UTC hour the next bar opens at — the hour an entry would actually fill.
+    pub fill_hour_utc: u32,
+    /// Whether that hour is inside the entry window. A signal outside it is
+    /// real but not tradeable under the intraday rule.
+    pub window_open: bool,
 }
 
 pub fn analyse(m: &mut Mcp, period: &str) -> Result<Analysis> {
@@ -226,6 +278,7 @@ pub fn analyse(m: &mut Mcp, period: &str) -> Result<Analysis> {
     Ok(Analysis {
         period: period.to_string(),
         bar_ts: bar.ts,
+        bar_ts_utc: server_to_utc(bar.ts),
         bars: closed.len(),
         close: bar.close,
         hi: hi[i],
@@ -239,6 +292,8 @@ pub fn analyse(m: &mut Mcp, period: &str) -> Result<Analysis> {
         uptrend: bar.close > trend[i],
         risk_per_lot: SL_ATR * a * CONTRACT,
         next_close_in: (bar.ts + 2 * per - now).max(0),
+        fill_hour_utc: utc_hour_of(bar.ts + per),
+        window_open: in_entry_window(utc_hour_of(bar.ts + per)),
     })
 }
 

@@ -86,6 +86,22 @@ It is a coarse, natural choice (the hours a person can watch), and 07–16
 behaves the same, so it is not a knife-edge — but it has not been walk-forward
 optimised. Treat the 5/5 as encouraging, not proven.
 
+### Walk-forward
+
+To test the window choice honestly, pick it on the earlier folds and trade the
+next one — no peeking. Grid: 06–17, 07–16, 07–18, 08–19, 09–20, 13–18 UTC.
+
+| test fold | window picked from earlier data | result |
+| --- | --- | --- |
+| 2 | 08–19 | +$2,130 |
+| 3 | 09–20 | +$3 |
+| 4 | 07–18 | +$516 |
+| 5 | 08–19 | +$10,565 |
+
+**+$13,213 out of sample, all four folds positive.** The window it picks moves
+around, which means the exact hours do not matter much — the day-session
+filter and the daily flat do. That is the part worth trusting.
+
 ## 3. Scalping the same signal — no
 
 Same Donchian signal on M15 (100,000 bars, ~4.3 years), stops and targets

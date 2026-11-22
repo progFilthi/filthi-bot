@@ -8,6 +8,14 @@
 built and tested for prop-account use; it is a paper-trade candidate, not a
 validated edge, and does not replace D3.
 
+> **Running rule, 2026-11-22.** The demo runner now trades the **intraday D3
+> variant**: entries only when the next H1 bar opens 07:00–18:00 UTC, flat at
+> the daily close, no overnight exposure. Measured on 17 years: +$17,167,
+> PF 1.27, 5.9% DD, positive in all five time slices and in walk-forward.
+> Full evidence in `docs/daytrading-variant.md`. H4 is retired; the ORB paper
+> logger is stopped. Everything below about the 240-bar rule still describes
+> the validated strategy, but the board is no longer running it unchanged.
+
 ---
 
 ## TL;DR
