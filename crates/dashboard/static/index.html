@@ -304,6 +304,18 @@
   </div>
 
   <div class="grid">
+    <section class="card wide">
+      <h2><span>Paper log — London breakout</span><span class="muted" id="orb-status">no log yet</span></h2>
+      <div class="hint" style="margin:-2px 0 10px">
+        A second rule, tested but not trusted: first break of the <b>08:00–13:00 London</b> box,
+        entries only in the next 60 minutes, 45-minute swing stop, 2R target, flat by 19:00 London.
+        The logger records signals and hypothetical results — it never places an order.
+      </div>
+      <div id="orb-body"><div class="empty">waiting for the paper logger…</div></div>
+    </section>
+  </div>
+
+  <div class="grid">
     <section class="card">
       <h2><span>Closed trades</span><span class="muted">strategy tagged <b>D3</b></span></h2>
       <div class="feed" id="deals"><div class="empty">no closed trades</div></div>
@@ -450,6 +462,93 @@ async function loadHistory(){
     drawChart(h.equity || []);
     drawFeed(h.signals || []);
   }catch(e){ /* keep the last good chart */ }
+}
+
+// --- London breakout paper log ---------------------------------------------
+// The rule is not traded here; the logger writes board.json and we only show
+// it. Everything on this card is hypothetical.
+async function loadOrb(){
+  try{
+    const r = await (await fetch("/api/orb")).json();
+    renderOrb(r.board);
+  }catch(_){ /* keep the last board */ }
+}
+
+function renderOrb(b){
+  const el = $("orb-body");
+  const status = $("orb-status");
+  if (!b){
+    el.innerHTML = `<div class="empty">paper logger has not run yet</div>`;
+    status.textContent = "no log yet";
+    status.className = "muted";
+    return;
+  }
+  const s = b.session || {};
+  const f = b.forward || {};
+  const live = b.market_open;
+  status.textContent = live
+    ? `live · last bar ${(b.last_bar_utc || "").slice(11)} UTC`
+    : `idle · feed ${Math.round(b.feed_minutes_behind || 0)}m behind`;
+  status.className = live ? "pill ok" : "pill";
+
+  const phaseClass = {
+    in_trade: "warn", waiting: "up", pre_session: "up", closed: "muted",
+    no_entry: "muted", skipped: "muted", idle: "muted"
+  }[s.phase] || "muted";
+  const t = s.ticket;
+  const box = s.box;
+  const w = s.session_utc || {};
+
+  const plan = t
+    ? `<span class="sig ${t.side}">${t.side.toUpperCase()}</span>
+       entry <b>${num(t.entry)}</b> · stop ${num(t.stop)} · target ${num(t.target)}
+       · ${num(t.lots,2)} lot · risk ${money(t.risk_usd_at_lots)}`
+    : `<span class="muted">${s.reason || "—"}</span>`;
+
+  const outcome = s.result_r != null
+    ? `<span class="${sign(s.result_r)}">${num(s.result_r,2)}R</span>`
+    : (s.open_r != null ? `<span class="${sign(s.open_r)}">${num(s.open_r,2)}R open</span>`
+                        : `<span class="muted">—</span>`);
+
+  const recent = (b.recent || []).map(x => `
+    <tr>
+      <td class="muted">${x.date}</td>
+      <td><span class="sig ${x.side}">${x.side.toUpperCase()}</span></td>
+      <td class="muted">${x.exit_kind}</td>
+      <td class="${sign(x.r)}">${num(x.r,2)}R</td>
+      <td class="${sign(x.pnl_usd)}">${money(x.pnl_usd)}</td>
+      <td class="muted">${num(x.lots,2)}</td>
+      <td class="muted">${money(x.equity_after)}</td>
+    </tr>`).join("");
+
+  el.innerHTML = `
+    <div class="kpis" style="margin-bottom:10px">
+      <div class="kpi"><label>logged</label><b>${f.trades ?? 0}</b></div>
+      <div class="kpi"><label>live / backfill</label><b>${f.live_trades ?? 0} / ${f.backfilled_trades ?? 0}</b></div>
+      <div class="kpi"><label>win rate</label><b>${pct(f.win_rate)}</b></div>
+      <div class="kpi"><label>expectancy</label><b class="${sign(f.expectancy_r)}">${num(f.expectancy_r,2)}R</b></div>
+      <div class="kpi"><label>profit factor</label><b>${f.profit_factor == null ? "—" : num(f.profit_factor,2)}</b></div>
+      <div class="kpi"><label>net</label><b class="${sign(f.net_usd)}">${money(f.net_usd)}</b></div>
+      <div class="kpi"><label>paper equity</label><b>${money(f.equity)}</b></div>
+      <div class="kpi"><label>max drawdown</label><b class="down">${num(f.max_drawdown_pct,1)}%</b></div>
+    </div>
+    <div class="row"><label>Session</label>
+      <span>${s.date || "—"} · <b class="${phaseClass}">${s.phase || "—"}</b>
+      ${s.is_current_day ? "" : '<span class="tag">last session</span>'}</span></div>
+    <div class="row"><label>Box</label>
+      <span class="muted">${box ? `high ${num(box.high)} · low ${num(box.low)} · ${num(box.height)} range · ${box.bars} bars` : "not formed yet"}</span></div>
+    <div class="row"><label>Window (UTC)</label>
+      <span class="muted">box ${w.box_start || "—"}–${w.box_end || "—"} · entries to ${w.entry_until || "—"} · flat ${w.flat || "—"}</span></div>
+    <div class="row"><label>Plan</label><span>${plan}</span></div>
+    <div class="row"><label>Result</label><span>${outcome}</span></div>
+    ${b.next_session ? `<div class="row"><label>Next box</label><span class="muted">${b.next_session.date} · ${b.next_session.box_start_utc}–${b.next_session.box_end_utc} UTC</span></div>` : ""}
+    ${recent ? `<div class="scroll" style="margin-top:10px"><table>
+      <thead><tr><th>Date</th><th>Side</th><th>Exit</th><th>R</th><th>P/L</th><th>Lots</th><th>Equity</th></tr></thead>
+      <tbody>${recent}</tbody></table></div>` : `<div class="empty">no closed paper trades yet</div>`}
+    <div class="hint" style="margin:9px 0 0">
+      Since ${f.since || "—"} · ${f.signals || 0} signals · expectancy needs ~40 live trades
+      before it means anything · worst day ${pct(f.worst_day_pct)} · ${f.max_losing_streak || 0} losses in a row
+    </div>`;
 }
 
 function drawChart(points){
@@ -678,6 +777,8 @@ es.onerror = () => { $("conn").className = "pill bad"; };
 
 loadHistory();
 setInterval(loadHistory, 30000);
+loadOrb();
+setInterval(loadOrb, 30000);
 </script>
 </body>
 </html>

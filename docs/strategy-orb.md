@@ -49,8 +49,8 @@ M5, box 09:00–14:00 London (his stated 4 am–9 am ET), 45-min swing stop, 2R:
 
 | Period | n | win | PF | expR | maxDD |
 |---|---|---|---|---|---|
-| 2025-06 → 2026-02 (train) | 175 | 48.3% | 1.33 | +0.131 | 6.8% |
-| 2026-03 → 2026-11 (**test**) | 166 | 42.2% | 0.77 | **−0.097** | 17.6% |
+| 2025-06 → 2026-02 (train) | 172 | 48.3% | 1.33 | +0.129 | 6.8% |
+| 2026-03 → 2026-11 (**test**) | 166 | 42.2% | 0.77 | **−0.099** | 17.7% |
 
 The second half is the honest test, and it loses money with a drawdown that
 would fail any challenge. The window was not the problem — every exit variant
@@ -58,9 +58,9 @@ failed there:
 
 | Exit | train expR | test expR |
 |---|---|---|
-| 2R target | +0.228 | +0.054 |
-| 3R target | +0.335 | +0.044 |
-| no target (ride to the cut-off) | +0.338 | +0.051 |
+| 2R target | +0.129 | −0.099 |
+| 3R target | +0.218 | −0.111 |
+| no target (ride to the cut-off) | +0.183 | −0.129 |
 
 So the *signal* — "first break of the London box after 09:00" — carries no
 out-of-sample information on this data, whatever the exit.
@@ -82,13 +82,13 @@ The same rules on **M1** (an independent, and weaker, period — Aug–Nov 2026)
 
 | n | win | PF | expR | t | maxDD | net |
 |---|---|---|---|---|---|---|
-| 45 | 46.7% | 1.52 | +0.291 | 1.39 | 2.9% | +7.4% |
+| 45 | 46.7% | 1.52 | +0.290 | 1.39 | 2.9% | +7.4% |
 
 Cost stress on the M5 config (spread + slippage multiplied):
 
 | spread | 15 | 30 | 45 | 60 |
 |---|---|---|---|---|
-| expR | +0.213 | +0.198 | +0.190 | +0.181 |
+| expR | +0.213 | +0.197 | +0.188 | +0.179 |
 
 Monthly R (M5, filtered) — 10 of 18 months positive, worst month −0.44R:
 
@@ -140,12 +140,62 @@ is the right one.
    thing here with a decade of out-of-sample behaviour.
 3. **Paper-trade the filtered version on demo** for 2–3 months, with the exact
    rules above. The missing evidence is forward data, and demo costs nothing.
-   Re-run this study when it has 40–60 forward trades.
+   Re-run this study when it has 40–60 forward trades. The logger that does
+   this is described in §6 and is running now.
 4. If it fails forward, the next question is not "tune the box", it is "is
    there any intraday signal on gold that survives 2× costs", and that needs a
    longer M1 history than the terminal can provide.
 
-## 6. Reproduce
+## 6. Paper-trading logger
+
+Since the backtest cannot settle the question, the filtered rule runs on demo
+as a **signal logger**: `xau-orb-paper` (in `crates/live`). It evaluates the
+same `xau_sim::orb` code the backtest uses against closed M5 bars from the
+terminal and writes two files. It cannot place an order — there is no order
+code in the binary.
+
+```
+runs/orb/journal.jsonl   one line per signal, one per result
+runs/orb/board.json      latest session + forward record (read by the dashboard)
+```
+
+Start it (token resolved the same way as the D3 runner):
+
+```bash
+cargo run --release -p xau-live --bin xau-orb-paper -- --poll 60
+# or, built:
+./target/release/xau-orb-paper --poll 60
+```
+
+It logs the configuration that survived both halves — box 08:00–13:00
+London, entries for 60 minutes, 45-minute swing stop, 2R, flat 19:00 — and
+nothing else, so there is no tuning after the fact.
+
+Two details that matter:
+
+- **Time conversion is per bar.** The broker clock is EET/EEST (UTC+2, +1h
+  in summer), so each bar is converted to UTC using the same DST dates. The
+  study window is knife-edge on an hour, so a fixed shift would silently turn
+  this into the configuration that tested at −0.21R.
+- **Live vs backfilled.** A line is marked `"live": true` only when it was
+  written within 30 minutes of the event; anything reconstructed after a
+  restart is `"live": false`. The board counts them separately, because only
+  live trades are forward evidence.
+
+The dashboard shows it under **Paper log — London breakout** (`/api/orb`).
+It displays the session phase, box, plan, result and the forward record with
+paper equity at 0.7% risk on $5,000. Nothing on that card can send an order.
+
+**Validation done before trusting the log:** the logger and the backtest were
+run over the same six sessions (2026-11-11 → 2026-11-20) and produced
+identical results — 6 trades, −$118.39, −0.517R, 2.67% max drawdown. The two
+paths differ completely (live MCP bars vs imported parquet), so this checks
+the plumbing rather than the rule.
+
+The forward record needs ~40 live trades before it is worth reading. Until
+then every number on that card is noise.
+
+## 7. Reproduce
 
 ```bash
 # main study (1.4 years of M5)

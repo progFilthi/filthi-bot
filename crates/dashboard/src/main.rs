@@ -948,6 +948,29 @@ async fn api_history(State(app): State<Arc<App>>) -> impl IntoResponse {
     ([("content-type", "application/json")], app.history())
 }
 
+/// The paper logger writes one file; serve it as-is rather than duplicating
+/// the rule in the dashboard. Missing file simply means it has not run yet.
+async fn api_orb(State(app): State<Arc<App>>) -> impl IntoResponse {
+    let path = app.root.join("runs/orb/board.json");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(board) => (StatusCode::OK, axum::Json(json!({ "ok": true, "board": board }))),
+            Err(e) => (
+                StatusCode::OK,
+                axum::Json(json!({ "ok": false, "board": null, "error": format!("unreadable board: {e}") })),
+            ),
+        },
+        Err(_) => (
+            StatusCode::OK,
+            axum::Json(json!({
+                "ok": true,
+                "board": null,
+                "error": "paper logger has not written a board yet"
+            })),
+        ),
+    }
+}
+
 async fn api_health(State(app): State<Arc<App>>) -> impl IntoResponse {
     let ok = app.snap.read().map(|s| s.connected).unwrap_or(false);
     let code = if ok {
@@ -974,6 +997,7 @@ fn router(app: Arc<App>) -> Router {
         .route("/", get(index))
         .route("/api/state", get(api_state))
         .route("/api/history", get(api_history))
+        .route("/api/orb", get(api_orb))
         .route("/api/stream", get(api_stream))
         .route("/healthz", get(api_health))
         .route("/api/order", post(api_order))

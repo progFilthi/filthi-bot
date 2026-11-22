@@ -21,6 +21,7 @@
 //! the stop only uses bars before the entry bar.
 
 use xau_core::{Bar, Side};
+use serde::{Deserialize, Serialize};
 
 use crate::engine::{CONTRACT, POINT};
 
@@ -50,12 +51,14 @@ pub enum StopMode {
     Box,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExitKind {
     Stop,
     Target,
     Time,
     EndOfData,
+    /// Still running: only `day_view` produces this.
+    Open,
 }
 
 impl ExitKind {
@@ -65,6 +68,7 @@ impl ExitKind {
             Self::Target => "TP",
             Self::Time => "TIME",
             Self::EndOfData => "EOD",
+            Self::Open => "OPEN",
         }
     }
 }
@@ -286,10 +290,20 @@ fn local_to_utc_min(day: i64, local_min: u32, tz: SessionTz) -> i64 {
     (local_min as i64 + 1_440 - shift) % 1_440
 }
 
+/// Is European summer time in force on this UTC day?
+///
+/// Exposed because the broker's server clock (EET/EEST) switches on the same
+/// dates, so a server timestamp becomes UTC by subtracting 2h, plus 1h while
+/// this is true.
+pub fn eu_dst_active(day: i64) -> bool {
+    dst_active(day, SessionTz::Eu)
+}
+
 // ---------------------------------------------------------------------------
 // The strategy
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy)]
 struct Chosen {
     /// Bar index the fill happens on.
     idx: usize,
@@ -299,165 +313,387 @@ struct Chosen {
     gap_fill: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Skip {
+    None,
+    ThinBox,
+    BoxFilter,
+    NoBreak,
+    Trend,
+}
+
+struct DayScan {
+    box_high: f64,
+    box_low: f64,
+    box_bars: usize,
+    chosen: Option<Chosen>,
+    ambiguous: bool,
+    skip: Skip,
+    cutoff: i64,
+}
+
+/// The whole per-day decision, shared by the backtest and the live logger so
+/// the two cannot drift apart.
+fn scan_day(
+    bars: &[Bar],
+    cfg: &OrbConfig,
+    day: i64,
+    day_start: usize,
+    day_end: usize,
+    ema_series: Option<&Vec<f64>>,
+) -> DayScan {
+    let midnight = day * 86_400;
+    let box_start = midnight + local_to_utc_min(day, cfg.box_start_min, cfg.tz) * 60;
+    let box_end = midnight + local_to_utc_min(day, cfg.box_end_min, cfg.tz) * 60;
+    let cutoff = midnight + local_to_utc_min(day, cfg.cutoff_min, cfg.tz) * 60;
+
+    let mut box_high = f64::MIN;
+    let mut box_low = f64::MAX;
+    let mut box_n = 0usize;
+    for b in &bars[day_start..day_end] {
+        if b.ts >= box_start && b.ts < box_end {
+            box_high = box_high.max(b.high);
+            box_low = box_low.min(b.low);
+            box_n += 1;
+        }
+    }
+
+    let mut scan = DayScan {
+        box_high,
+        box_low,
+        box_bars: box_n,
+        chosen: None,
+        ambiguous: false,
+        skip: Skip::None,
+        cutoff,
+    };
+
+    if box_n < cfg.min_box_bars {
+        scan.skip = Skip::ThinBox;
+        return scan;
+    }
+    let box_pts = (box_high - box_low) / POINT;
+    if (cfg.min_box_pts > 0.0 && box_pts < cfg.min_box_pts)
+        || (cfg.max_box_pts > 0.0 && box_pts > cfg.max_box_pts)
+    {
+        scan.skip = Skip::BoxFilter;
+        return scan;
+    }
+
+    for k in day_start..day_end {
+        let bar = &bars[k];
+        if bar.ts < box_end || bar.ts >= cutoff {
+            continue;
+        }
+        if cfg.max_wait_min > 0 && bar.ts >= box_end + cfg.max_wait_min as i64 * 60 {
+            break;
+        }
+        let hi_break = bar.high > box_high;
+        let lo_break = bar.low < box_low;
+        if !hi_break && !lo_break {
+            continue;
+        }
+
+        let side = if hi_break && lo_break {
+            scan.ambiguous = true;
+            // Both edges traded inside one bar: assume the nearer edge to
+            // the open was reached first rather than flattering the result.
+            if (bar.open - box_low).abs() <= (box_high - bar.open).abs() {
+                Side::Sell
+            } else {
+                Side::Buy
+            }
+        } else if hi_break {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
+
+        match cfg.confirm {
+            Confirm::Break => {
+                let level = match side {
+                    Side::Buy => box_high,
+                    Side::Sell => box_low,
+                };
+                scan.chosen = Some(Chosen {
+                    idx: k,
+                    side,
+                    trigger: level,
+                    gap_fill: match side {
+                        Side::Buy => bar.open > level,
+                        Side::Sell => bar.open < level,
+                    },
+                });
+            }
+            Confirm::Close => {
+                let outside = match side {
+                    Side::Buy => bar.close > box_high,
+                    Side::Sell => bar.close < box_low,
+                };
+                if !outside {
+                    continue;
+                }
+                let nk = k + 1;
+                if nk < day_end && bars[nk].ts < cutoff {
+                    scan.chosen = Some(Chosen {
+                        idx: nk,
+                        side,
+                        trigger: bars[nk].open,
+                        gap_fill: true,
+                    });
+                }
+            }
+        }
+        break;
+    }
+
+    let Some(ch) = scan.chosen else {
+        scan.skip = Skip::NoBreak;
+        return scan;
+    };
+
+    if let Some(e) = ema_series {
+        let ref_idx = ch.idx.saturating_sub(1);
+        let trend = e.get(ref_idx).copied().unwrap_or(f64::NAN);
+        if trend.is_finite() {
+            let agrees = match ch.side {
+                Side::Buy => ch.trigger > trend,
+                Side::Sell => ch.trigger < trend,
+            };
+            if !agrees {
+                scan.skip = Skip::Trend;
+                scan.chosen = None;
+            }
+        }
+    }
+    scan
+}
+
+fn ema_series_for(bars: &[Bar], cfg: &OrbConfig) -> Option<Vec<f64>> {
+    if cfg.ema_period > 1 {
+        Some(ema(&bars.iter().map(|b| b.close).collect::<Vec<_>>(), cfg.ema_period))
+    } else {
+        None
+    }
+}
+
+fn day_ranges(bars: &[Bar]) -> Vec<(i64, usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bars.len() {
+        let day = bars[i].ts.div_euclid(86_400);
+        let start = i;
+        while i < bars.len() && bars[i].ts.div_euclid(86_400) == day {
+            i += 1;
+        }
+        out.push((day, start, i));
+    }
+    out
+}
+
 /// Run the ORB strategy and return cost-adjusted trades.
 pub fn run(bars: &[Bar], cfg: &OrbConfig) -> OrbRun {
     let mut out = OrbRun::default();
     if bars.is_empty() {
         return out;
     }
+    let ema_series = ema_series_for(bars, cfg);
 
-    // Optional trend gate: EMA of the close, evaluated one bar before entry.
-    let ema_series: Option<Vec<f64>> = if cfg.ema_period > 1 {
-        Some(ema(&bars.iter().map(|b| b.close).collect::<Vec<_>>(), cfg.ema_period))
-    } else {
-        None
-    };
-
-    let mut i = 0usize;
-    while i < bars.len() {
-        let day = bars[i].ts.div_euclid(86_400);
-        let day_start = i;
-        while i < bars.len() && bars[i].ts.div_euclid(86_400) == day {
-            i += 1;
-        }
-        let day_end = i; // exclusive
+    for (day, day_start, day_end) in day_ranges(bars) {
         out.days_scanned += 1;
-
-        let midnight = day * 86_400;
-        let box_start = midnight + local_to_utc_min(day, cfg.box_start_min, cfg.tz) * 60;
-        let box_end = midnight + local_to_utc_min(day, cfg.box_end_min, cfg.tz) * 60;
-        let cutoff = midnight + local_to_utc_min(day, cfg.cutoff_min, cfg.tz) * 60;
-
-        let mut box_high = f64::MIN;
-        let mut box_low = f64::MAX;
-        let mut box_n = 0usize;
-        for b in &bars[day_start..day_end] {
-            if b.ts >= box_start && b.ts < box_end {
-                box_high = box_high.max(b.high);
-                box_low = box_low.min(b.low);
-                box_n += 1;
-            }
-        }
-        if box_n < cfg.min_box_bars {
-            out.thin_box += 1;
-            continue;
-        }
-        let box_pts = (box_high - box_low) / POINT;
-        if (cfg.min_box_pts > 0.0 && box_pts < cfg.min_box_pts)
-            || (cfg.max_box_pts > 0.0 && box_pts > cfg.max_box_pts)
-        {
-            out.box_filtered += 1;
-            continue;
-        }
-
-        let mut chosen: Option<Chosen> = None;
-        let mut ambiguous = false;
-
-        for k in day_start..day_end {
-            let bar = &bars[k];
-            if bar.ts < box_end || bar.ts >= cutoff {
+        let scan = scan_day(bars, cfg, day, day_start, day_end, ema_series.as_ref());
+        match scan.skip {
+            Skip::ThinBox => {
+                out.thin_box += 1;
                 continue;
             }
-            if cfg.max_wait_min > 0 && bar.ts >= box_end + cfg.max_wait_min as i64 * 60 {
-                break;
-            }
-            let hi_break = bar.high > box_high;
-            let lo_break = bar.low < box_low;
-            if !hi_break && !lo_break {
+            Skip::BoxFilter => {
+                out.box_filtered += 1;
                 continue;
             }
-
-            let side = if hi_break && lo_break {
-                ambiguous = true;
-                // Both edges traded inside one bar: assume the nearer edge to
-                // the open was reached first rather than flattering the result.
-                if (bar.open - box_low).abs() <= (box_high - bar.open).abs() {
-                    Side::Sell
-                } else {
-                    Side::Buy
+            Skip::NoBreak => {
+                if scan.ambiguous {
+                    out.ambiguous_breaks += 1;
                 }
-            } else if hi_break {
-                Side::Buy
-            } else {
-                Side::Sell
-            };
-
-            match cfg.confirm {
-                Confirm::Break => {
-                    let level = match side {
-                        Side::Buy => box_high,
-                        Side::Sell => box_low,
-                    };
-                    chosen = Some(Chosen {
-                        idx: k,
-                        side,
-                        trigger: level,
-                        gap_fill: match side {
-                            Side::Buy => bar.open > level,
-                            Side::Sell => bar.open < level,
-                        },
-                    });
-                }
-                Confirm::Close => {
-                    let outside = match side {
-                        Side::Buy => bar.close > box_high,
-                        Side::Sell => bar.close < box_low,
-                    };
-                    if !outside {
-                        continue;
-                    }
-                    let nk = k + 1;
-                    if nk < day_end && bars[nk].ts < cutoff {
-                        chosen = Some(Chosen {
-                            idx: nk,
-                            side,
-                            trigger: bars[nk].open,
-                            gap_fill: true,
-                        });
-                    }
-                }
+                out.no_break += 1;
+                continue;
             }
-            break;
+            Skip::Trend => {
+                out.trend_filtered += 1;
+                continue;
+            }
+            Skip::None => {}
         }
-
-        if ambiguous {
+        if scan.ambiguous {
             out.ambiguous_breaks += 1;
         }
 
-        let Some(ch) = chosen else {
+        let Some(ch) = scan.chosen else {
             out.no_break += 1;
             continue;
         };
-
-        if let Some(e) = &ema_series {
-            let ref_idx = ch.idx.saturating_sub(1);
-            let trend = e[ref_idx];
-            if trend.is_finite() {
-                let agrees = match ch.side {
-                    Side::Buy => ch.trigger > trend,
-                    Side::Sell => ch.trigger < trend,
-                };
-                if !agrees {
-                    out.trend_filtered += 1;
-                    continue;
-                }
-            }
-        }
-
         let Some(t) = build_trade(
-            bars, cfg, day, ch.idx, ch.side, ch.trigger, ch.gap_fill, box_high, box_low,
+            bars,
+            cfg,
+            day,
+            ch.idx,
+            ch.side,
+            ch.trigger,
+            ch.gap_fill,
+            scan.box_high,
+            scan.box_low,
         ) else {
             out.risk_filtered += 1;
             continue;
         };
-
-        out.trades.push(manage(bars, cfg, ch.idx, day_end, cutoff, t));
+        out.trades
+            .push(manage(bars, cfg, ch.idx, day_end, scan.cutoff, t, true));
     }
-
     out
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Live state for one session, used by the paper-trading logger.
+#[derive(Debug, Clone)]
+pub struct DayView {
+    pub day: i64,
+    pub box_high: f64,
+    pub box_low: f64,
+    pub box_bars: usize,
+    pub skip: &'static str,
+    pub side: Option<Side>,
+    pub entry: f64,
+    pub stop: f64,
+    pub target: f64,
+    pub entry_ts: i64,
+    pub last_ts: i64,
+    pub last_close: f64,
+    /// Unrealised R while the trade is running.
+    pub open_r: f64,
+    /// Realised R once the trade is finished.
+    pub result_r: Option<f64>,
+    pub exit: Option<ExitKind>,
+    pub reason: &'static str,
+    /// Machine-readable state: `waiting`, `no_entry`, `skipped`, `in_trade`,
+    /// `closed`.
+    pub phase: &'static str,
+}
+
+/// Evaluate `day` without forcing it closed: an unresolved trade is reported
+/// as still open at the last available close. `now_ts` decides whether the
+/// break window has already passed.
+pub fn day_view(bars: &[Bar], cfg: &OrbConfig, day: i64, now_ts: i64) -> Option<DayView> {
+    let (_, day_start, day_end) = day_ranges(bars)
+        .into_iter()
+        .find(|(d, _, _)| *d == day)?;
+    let ema_series = ema_series_for(bars, cfg);
+    let scan = scan_day(bars, cfg, day, day_start, day_end, ema_series.as_ref());
+    let last = day_end - 1;
+
+    let mut view = DayView {
+        day,
+        box_high: scan.box_high,
+        box_low: scan.box_low,
+        box_bars: scan.box_bars,
+        skip: match scan.skip {
+            Skip::None => "",
+            Skip::ThinBox => "thin box — not enough bars in the session",
+            Skip::BoxFilter => "box height filter",
+            Skip::NoBreak => "no break inside the entry window",
+            Skip::Trend => "break disagreed with the trend filter",
+        },
+        side: None,
+        entry: f64::NAN,
+        stop: f64::NAN,
+        target: f64::NAN,
+        entry_ts: 0,
+        last_ts: bars[last].ts,
+        last_close: bars[last].close,
+        open_r: 0.0,
+        result_r: None,
+        exit: None,
+        reason: "",
+        phase: "waiting",
+    };
+
+    let Some(ch) = scan.chosen else {
+        let window_open = now_ts < scan.cutoff
+            && now_ts < day * 86_400 + local_to_utc_min(day, cfg.box_end_min, cfg.tz) * 60
+                + cfg.max_wait_min.max(1) as i64 * 60;
+        view.reason = if scan.skip == Skip::None && window_open {
+            "waiting for the first break"
+        } else if scan.skip == Skip::None {
+            "entry window closed without a break"
+        } else {
+            "skipped"
+        };
+        view.phase = if scan.skip != Skip::None {
+            "skipped"
+        } else if window_open {
+            "waiting"
+        } else {
+            "no_entry"
+        };
+        return Some(view);
+    };
+
+    let Some(mut t) = build_trade(
+        bars,
+        cfg,
+        day,
+        ch.idx,
+        ch.side,
+        ch.trigger,
+        ch.gap_fill,
+        scan.box_high,
+        scan.box_low,
+    ) else {
+        view.skip = "stop too wide";
+        view.reason = "skipped";
+        return Some(view);
+    };
+
+    view.side = Some(t.side);
+    view.entry = t.entry;
+    view.stop = t.stop;
+    view.target = t.target;
+    view.entry_ts = t.entry_ts;
+
+    t = manage(bars, cfg, ch.idx, day_end, scan.cutoff, t, false);
+    view.last_ts = t.exit_ts;
+    view.last_close = t.exit;
+    view.exit = Some(t.reason);
+    if t.reason == ExitKind::Open {
+        view.open_r = t.r;
+        view.reason = "in trade";
+        view.phase = "in_trade";
+    } else {
+        view.result_r = Some(t.r);
+        view.reason = match t.reason {
+            ExitKind::Stop => "stopped out",
+            ExitKind::Target => "target hit",
+            ExitKind::Time => "closed at the flat time",
+            _ => "finished",
+        };
+        view.phase = "closed";
+    }
+    Some(view)
+}
+
+/// The session's clocks for one UTC day, as epoch seconds: box start, box
+/// end, last moment a break may be taken, and the hard flat time.
+pub fn session_times(day: i64, cfg: &OrbConfig) -> (i64, i64, i64, i64) {
+    let midnight = day * 86_400;
+    let box_start = midnight + local_to_utc_min(day, cfg.box_start_min, cfg.tz) * 60;
+    let box_end = midnight + local_to_utc_min(day, cfg.box_end_min, cfg.tz) * 60;
+    let cutoff = midnight + local_to_utc_min(day, cfg.cutoff_min, cfg.tz) * 60;
+    let entry_end = if cfg.max_wait_min > 0 {
+        (box_end + cfg.max_wait_min as i64 * 60).min(cutoff)
+    } else {
+        cutoff
+    };
+    (box_start, box_end, entry_end, cutoff)
+}
+
 fn build_trade(
     bars: &[Bar],
     cfg: &OrbConfig,
@@ -559,6 +795,7 @@ fn manage(
     day_end: usize,
     cutoff: i64,
     mut t: OrbTrade,
+    force: bool,
 ) -> OrbTrade {
     // A buy closes at the bid; a sell closes at the ask.
     let exit_cost = |side: Side, px: f64, slip_pts: f64| match side {
@@ -570,7 +807,7 @@ fn manage(
     for k in entry_idx..day_end {
         let bar = &bars[k];
         if bar.ts >= cutoff && k > entry_idx {
-            result = Some((k, bar.open, ExitKind::Time));
+            result = Some((k, exit_cost(t.side, bar.open, 0.0), ExitKind::Time));
             break;
         }
         if k == entry_idx && cfg.confirm == Confirm::Break {
@@ -602,18 +839,18 @@ fn manage(
             Side::Sell => bar.low <= t.target,
         };
         if targeted {
-            let px = match t.side {
-                Side::Buy => t.target,
-                Side::Sell => t.target + cfg.spread_pts * POINT,
-            };
-            result = Some((k, px, ExitKind::Target));
+            result = Some((k, exit_cost(t.side, t.target, 0.0), ExitKind::Target));
             break;
         }
     }
 
     let (k, px, reason) = result.unwrap_or_else(|| {
         let last = day_end - 1;
-        (last, bars[last].close, ExitKind::EndOfData)
+        (
+            last,
+            exit_cost(t.side, bars[last].close, 0.0),
+            if force { ExitKind::EndOfData } else { ExitKind::Open },
+        )
     });
 
     t.exit = px;
@@ -1074,6 +1311,47 @@ mod tests {
         assert_eq!(run.trades.len(), 1);
         assert_eq!(run.trades[0].reason, ExitKind::Stop);
         assert!(run.trades[0].r < -0.99, "stop-out must cost at least 1R after slippage");
+    }
+
+    #[test]
+    fn day_view_agrees_with_the_backtest_on_finished_trades() {
+        let mut bars = Vec::new();
+        for m in 0..300 {
+            let (h, l) = if m % 60 < 30 { (2005.0, 1995.0) } else { (2002.0, 1998.0) };
+            bars.push(bar(DAY * 86_400 + (9 * 60 + m) * 60, 2000.0, h, l, 2000.0));
+        }
+        bars.push(bar(DAY * 86_400 + 14 * 3600, 2004.0, 2010.0, 2003.0, 2008.0));
+        for (i, px) in [2012.0, 2016.0, 2025.0].iter().enumerate() {
+            let ts = DAY * 86_400 + 14 * 3600 + (i as i64 + 1) * 60;
+            bars.push(bar(ts, px - 2.0, *px + 2.0, px - 3.0, *px));
+        }
+        let cfg = OrbConfig { min_box_bars: 60, ..Default::default() };
+        let run = run(&bars, &cfg);
+        let t = &run.trades[0];
+        let view = day_view(&bars, &cfg, DAY, DAY * 86_400 + 20 * 3600).unwrap();
+        assert_eq!(view.side, Some(t.side));
+        assert_eq!(view.exit, Some(t.reason));
+        assert!((view.result_r.unwrap() - t.r).abs() < 1e-9);
+        assert_eq!(view.reason, "target hit");
+    }
+
+    #[test]
+    fn day_view_reports_a_running_trade_as_open() {
+        let mut bars = Vec::new();
+        for m in 0..300 {
+            bars.push(bar(DAY * 86_400 + (9 * 60 + m) * 60, 2000.0, 2004.0, 1996.0, 2000.0));
+        }
+        // Break up, then drift sideways with no target and no stop.
+        bars.push(bar(DAY * 86_400 + 14 * 3600, 2003.0, 2006.0, 2002.0, 2005.0));
+        for m in 1..10 {
+            bars.push(bar(DAY * 86_400 + 14 * 3600 + m * 60, 2005.0, 2006.0, 2003.0, 2004.0));
+        }
+        let cfg = OrbConfig { min_box_bars: 60, ..Default::default() };
+        let view = day_view(&bars, &cfg, DAY, DAY * 86_400 + 14 * 3600 + 600).unwrap();
+        assert_eq!(view.reason, "in trade");
+        assert_eq!(view.exit, Some(ExitKind::Open));
+        assert!(view.result_r.is_none());
+        assert!(view.open_r < 0.0, "drifted against the entry, so R should be negative");
     }
 
     #[test]

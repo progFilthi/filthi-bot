@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "xau-live"
 path = "src/main.rs"
 
+[[bin]]
+name = "xau-orb-paper"
+path = "src/bin/orb_paper.rs"
+
 [dependencies]
 xau-core = { workspace = true }
 xau-sim = { path = "../simulator" }

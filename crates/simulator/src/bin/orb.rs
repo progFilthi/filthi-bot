@@ -300,6 +300,8 @@ fn detail(bars: &[xau_core::Bar], cfg: &OrbConfig) {
             ExitKind::Target => targets += 1,
             ExitKind::Time => times += 1,
             ExitKind::EndOfData => eod += 1,
+            // `run` never leaves a trade open; only `day_view` does.
+            ExitKind::Open => {}
         }
     }
     println!();
