@@ -787,24 +787,29 @@ shows a banner with the last quote time. `Confirm` and `Review` are disabled
 client-side as well. Close and break-even are deliberately **not** gated: if a
 position is open you should always be able to ask for an exit.
 
-### The 5-hour hold question
+### The 5-hour hold question — corrected 2026-11-22
 
-Measured on the validated D3 runs, profit lives in the *long* trades. A 5-hour
-cap would keep the losing half and cut the winning half:
+This section used to say a short hold would "keep the losing half and cut the
+winning half", and recorded **no short-hold variant**.
 
-| Timeframe | ≤8 bars (loss) | 9–20 bars | 21–60 bars |
-| --- | --- | --- | --- |
-| H4 (4h bars) | −$16,958 | +$14,763 | **+$29,505** |
-| H1 (1h bars) | −$57,478 | +$21,189 | **+$62,162** |
-| M15 (15m bars) | −$58,523 | +$14,483 | **+$50,063** |
+That inference was wrong. It bucketed *realised* trades by how long they
+happened to last; fast exits are mostly stops, so that bucket is negative. A
+hold **cap** does not create those trades, it truncates long winners instead.
+Measured directly (`docs/daytrading-variant.md`):
 
-On M15, everything held for 5 hours or less nets **−$44,039**; the edge begins
-after that. So "shorter than five hours" is not a setting on this strategy, it
-is a different strategy, and it needs its own validation before it gets money.
-The closest thing to an intraday version is M15 (winners typically run 5–15
-hours), at PF 1.10 over 4 years — noticeably weaker than H1/H4. **Decision:
-no short-hold variant.** The board stays on H1 and H4; the only cap is the
-240-bar exit that is part of the validated rule.
+| variant | trades | PF | net | max DD |
+| --- | --- | --- | --- | --- |
+| rule (240-bar cap) | 1,911 | 1.32 | +$26,647 | 9.9% |
+| 12-hour cap | 2,320 | 1.24 | +$23,074 | 8.1% |
+| **07–18 UTC entries, flat at the daily close** | **1,820** | **1.27** | **+$17,167** | **5.9%** |
+
+The day version gives up about a third of the net and nearly halves the
+drawdown, and it is positive in all five time slices where the original rule is
+negative in one. It is **not** approved for money yet — the entry window was
+chosen after seeing the data and still needs a walk-forward — but "no
+short-hold variant" is no longer the right summary. The board stays on H1 and
+H4 for the demo; this is a candidate for the challenge, not a change to the
+running rule.
 
 ### Attribution is deliberate
 

@@ -43,6 +43,7 @@ fn base_cfg() -> EngineConfig {
         trail_atr: 2.0,
         max_hold_bars: 240,
         exit_on_opposite: false,
+        flat_before_gap_min: None,
         allowed_hours: Vec::new(),
         spread_pts: 20.0,
         commission_per_lot: 0.0,
@@ -69,6 +70,7 @@ fn specs() -> Vec<Spec> {
         trail_atr: 0.0,
         max_hold_bars: 0,
         exit_on_opposite: true,
+        flat_before_gap_min: None,
         allowed_hours: vec![13, 14, 15, 16, 17],
         ..base_cfg()
     };

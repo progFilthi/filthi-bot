@@ -70,6 +70,7 @@ fn d3_config() -> EngineConfig {
         trail_atr: 2.5,
         max_hold_bars: 240,
         exit_on_opposite: false,
+        flat_before_gap_min: None,
         allowed_hours: Vec::new(),
         spread_pts: 20.0,
         commission_per_lot: 0.0,

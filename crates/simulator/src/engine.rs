@@ -38,6 +38,11 @@ pub struct EngineConfig {
     pub exit_on_opposite: bool,
     /// Only allow entries when the UTC hour is in this list (empty = all hours).
     pub allowed_hours: Vec<u32>,
+    /// Force-close at the close of the last bar before a gap of at least this
+    /// many minutes (`None` = disabled). The broker's daily break and the
+    /// weekend both produce such gaps, so this models "flat before the day
+    /// ends" without hard-coding a clock hour that DST moves around.
+    pub flat_before_gap_min: Option<i64>,
     /// Spread cost in points per round trip.
     pub spread_pts: f64,
     /// Commission per lot per round trip, in account currency.
@@ -58,6 +63,7 @@ impl Default for EngineConfig {
             max_hold_bars: 0,
             exit_on_opposite: true,
             allowed_hours: Vec::new(),
+            flat_before_gap_min: None,
             spread_pts: 20.0,
             commission_per_lot: 0.0,
             max_drawdown_pct: 100.0,
@@ -84,6 +90,8 @@ pub enum ExitReason {
     TakeProfit,
     Trail,
     TimeExit,
+    /// Forced out at the session's flat hour, not because time ran out.
+    SessionClose,
     OppositeSignal,
     EndOfData,
 }
@@ -95,6 +103,7 @@ impl ExitReason {
             Self::TakeProfit => "TP",
             Self::Trail => "TRAIL",
             Self::TimeExit => "TIME",
+            Self::SessionClose => "FLAT",
             Self::OppositeSignal => "FLIP",
             Self::EndOfData => "EOD",
         }
@@ -196,6 +205,11 @@ pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> R
                 exit = Some((p.tp, ExitReason::TakeProfit));
             } else if cfg.max_hold_bars > 0 && i.saturating_sub(p.entry_bar) >= cfg.max_hold_bars {
                 exit = Some((bar.close, ExitReason::TimeExit));
+            } else if cfg.flat_before_gap_min.is_some_and(|gap| match bars.get(i + 1) {
+                Some(next) => (next.ts - bar.ts) / 60 >= gap,
+                None => true,
+            }) {
+                exit = Some((bar.close, ExitReason::SessionClose));
             } else if cfg.exit_on_opposite {
                 // Signal at the previous close opposing our position.
                 if let Some(sig) = signals.get(i.saturating_sub(1)).copied().flatten() {
