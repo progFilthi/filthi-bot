@@ -24,6 +24,7 @@ LIVE_BIN="$ROOT/target/release/xau-live"
 TOKEN_FILE="$ROOT/runs/live/mcp_token"
 DASH_LOG="$ROOT/runs/live/dashboard.log"
 LIVE_LOG="$ROOT/runs/live/rust_h1_runner.log"
+LIVE_OUT="$ROOT/runs/live/rust_h1_runner.out"
 
 # Matched against the process command line, so it works whether the binary was
 # started from here, from RustRover, or by hand as ./target/release/...
@@ -144,7 +145,9 @@ cmd_start() {
 $(tail -n 15 "$DASH_LOG" 2>/dev/null)"
 
   say "starting the intraday runner (H1, 0.01 lot, entries 07:00–18:00 UTC)…"
-  nohup "$LIVE_BIN" --period H1 --intraday --lots 0.01 --poll 60 >>"$LIVE_LOG" 2>&1 &
+  # The runner writes its own JSON log; stdout is only for panics and warnings.
+  # Pointing it at the same file would double every line.
+  nohup "$LIVE_BIN" --period H1 --intraday --lots 0.01 --poll 60 >"$LIVE_OUT" 2>&1 &
   disown
   sleep 3
 
@@ -156,7 +159,7 @@ $(tail -n 15 "$DASH_LOG" 2>/dev/null)"
 }
 
 cmd_logs() {
-  tail -n 20 -f "$DASH_LOG" "$LIVE_LOG"
+  tail -n 20 -f "$DASH_LOG" "$LIVE_LOG" "$LIVE_OUT"
 }
 
 case "${1:-help}" in
