@@ -44,7 +44,7 @@ use xau_live::market::{
     positions, server_now, trade_history, utc_hour_of,
 };
 use xau_live::mcp::Mcp;
-use xau_sim::strategy::{atr, entry_signals, StratKind, StratParams};
+use xau_sim::strategy::{atr, entry_signals, sma, stddev, StratKind, StratParams};
 
 #[derive(Parser, Debug)]
 #[command(name = "xau-scalp-live", version, about = "M15 Bollinger scalper over MT5 MCP")]
@@ -263,6 +263,20 @@ fn risk_allowed(risk: f64, equity: f64, cap_pct: f64) -> bool {
     risk / equity * 100.0 <= cap_pct
 }
 
+/// The band the rule is comparing against, for the log only.
+///
+/// Same maths as `entry_signals`, so what the dashboard shows is exactly what
+/// the rule sees — a second implementation that drifts would make the panel lie
+/// about why nothing has traded.
+fn bands(closes: &[f64], lookback: usize, k: f64) -> Option<(f64, f64, f64)> {
+    let mid = sma(closes, lookback).last().copied()?;
+    let sd = stddev(closes, lookback).last().copied()?;
+    if !mid.is_finite() || !sd.is_finite() || sd <= 0.0 {
+        return None;
+    }
+    Some((mid - k * sd, mid, mid + k * sd))
+}
+
 // --- one pass ---------------------------------------------------------------
 fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
     let acct = account(&mut ctx.mcp)?;
@@ -477,17 +491,23 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
 
     match sig {
         None => {
-            ctx.log(
-                "no_signal",
-                &[
-                    ("close", json!(bar.close)),
-                    ("atr", json!(ctx.round(atr_now))),
-                    // Both on the broker clock. If bar_ts + one period is still
-                    // ahead of now, the bar we just read was not closed yet.
-                    ("bar_ts", json!(bar.ts)),
-                    ("now", json!(now)),
-                ],
-            );
+            let mut f: Vec<(&str, Value)> = vec![
+                ("close", json!(bar.close)),
+                ("atr", json!(ctx.round(atr_now))),
+                // Both on the broker clock. If bar_ts + one period is still
+                // ahead of now, the bar we just read was not closed yet.
+                ("bar_ts", json!(bar.ts)),
+                ("now", json!(now)),
+            ];
+            // Where a signal would have to come from, so the panel can show
+            // the gap instead of just "waiting".
+            let closes: Vec<f64> = closed.iter().map(|b| b.close).collect();
+            if let Some((lo, mid, up)) = bands(&closes, ctx.lookback, ctx.band_k) {
+                f.push(("band_lower", json!(ctx.round(lo))));
+                f.push(("band_mid", json!(ctx.round(mid))));
+                f.push(("band_upper", json!(ctx.round(up))));
+            }
+            ctx.log("no_signal", &f);
         }
         Some(_) if !window_ok => {
             ctx.log(
@@ -769,5 +789,53 @@ mod tests {
         assert_eq!(round_to(1.09173 - 0.5 * 0.00065, 5), 1.09141);
         assert_eq!(round_to(1.09173 + 1.5 * 0.00065, 5), 1.09271);
         assert_eq!(round_to(3619.876, 2), 3619.88);
+    }
+
+    #[test]
+    fn logged_bands_are_the_ones_the_rule_uses() {
+        // The panel says "a close above X sells". If the logged band drifted
+        // from the rule's, the panel would explain the wrong wait.
+        let closes: Vec<f64> = (0..40)
+            .map(|i| 1.09 + 0.0004 * ((i as f64) * 0.7).sin())
+            .collect();
+        let bars: Vec<Bar> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Bar {
+                ts: 1_700_000_000 + i as i64 * 900,
+                open: c,
+                high: c + 0.0001,
+                low: c - 0.0001,
+                close: c,
+                volume: 1,
+                spread_pts: 3,
+                spread_max: 3,
+            })
+            .collect();
+        let p = StratParams {
+            lookback: 20,
+            band_k: 2.0,
+            ..Default::default()
+        };
+        let (lo, _mid, up) = bands(&closes, 20, 2.0).expect("bands");
+        let sig = entry_signals(&bars, StratKind::Bollinger, &p);
+        // Find the last bar whose close is outside the band we reported.
+        let i = closes.len() - 1;
+        if closes[i] > up {
+            assert_eq!(sig[i], Some(Side::Sell));
+        } else if closes[i] < lo {
+            assert_eq!(sig[i], Some(Side::Buy));
+        } else {
+            assert_eq!(sig[i], None);
+        }
+    }
+
+    #[test]
+    fn bands_refuse_a_flat_market() {
+        // A dead market has zero width; dividing the wait by it would show a
+        // signal that can never come, so no band is reported at all.
+        let flat = vec![1.1; 30];
+        assert!(bands(&flat, 20, 2.0).is_none());
+        assert!(bands(&flat[..5], 20, 2.0).is_none());
     }
 }

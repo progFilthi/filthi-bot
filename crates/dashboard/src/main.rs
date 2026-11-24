@@ -189,6 +189,15 @@ struct ScalpOpen {
     bars: u32,
 }
 
+#[derive(Serialize, Clone, Default)]
+/// The band the runner is waiting on, taken from its latest no-signal line.
+struct ScalpNext {
+    close: f64,
+    lower: f64,
+    upper: f64,
+    ts: String,
+}
+
 /// The M15 EURUSD scalper, read from its own log and state file.
 ///
 /// It is a separate process writing a separate JSONL, so this is a file read,
@@ -210,6 +219,8 @@ struct Scalp {
     win_rate: f64,
     last_risk_pct: f64,
     open: Option<ScalpOpen>,
+    /// What the rule is waiting for right now, if it said so.
+    next: Option<ScalpNext>,
     last: Vec<ScalpTrade>,
 }
 
@@ -878,6 +889,20 @@ impl App {
                         if v["dry_run"].as_bool() != Some(true) {
                             s.signals += 1;
                             s.last_risk_pct = v["risk_pct"].as_f64().unwrap_or(0.0);
+                        }
+                    }
+                    "no_signal" => {
+                        // Only the newest line matters; the file is appended to
+                        // once per closed bar, so later lines overwrite it.
+                        if let (Some(lo), Some(up)) =
+                            (v["band_lower"].as_f64(), v["band_upper"].as_f64())
+                        {
+                            s.next = Some(ScalpNext {
+                                close: v["close"].as_f64().unwrap_or(0.0),
+                                lower: lo,
+                                upper: up,
+                                ts: v["ts"].as_str().unwrap_or("").to_string(),
+                            });
                         }
                     }
                     // The broker closing the position is the only place a

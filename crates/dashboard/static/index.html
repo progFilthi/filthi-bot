@@ -481,9 +481,12 @@ function render(s){
   $("sc-open").innerHTML = sc.open
     ? `${sc.open.side.toUpperCase()} @ ${num(sc.open.entry, 5)} · stop ${num(sc.open.sl, 5)} · target ${num(sc.open.tp, 5)} · ${sc.open.bars} bars`
     : `<span class="muted">flat</span>`;
-  $("sc-note").textContent = sc.closed
+  const scDesc = sc.closed
     ? `${sc.signals} entries taken · fades a close outside the 2σ band, 0.5 ATR stop, 1.5 ATR target, out after 8 bars`
     : "waiting for the first trade — the rule takes about 5 a day inside 07:00–18:00 UTC";
+  $("sc-note").innerHTML = sc.next
+    ? `<span class="muted">${scDesc}</span><br>next signal: a close above <b>${num(sc.next.upper, 5)}</b> sells · below <b>${num(sc.next.lower, 5)}</b> buys · last close ${num(sc.next.close, 5)}`
+    : scDesc;
   const scLast = (sc.last || []).slice().reverse();
   $("sc-feed").innerHTML = scLast.length ? scLast.map(t => `
     <div class="item">
