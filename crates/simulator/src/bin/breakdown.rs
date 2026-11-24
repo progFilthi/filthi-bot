@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::Context;
 use xau_core::{Bar, Side};
 use xau_data::read_bars_parquet;
-use xau_sim::engine::{backtest, EngineConfig, ExitReason, Report, Trade, CONTRACT};
+use xau_sim::engine::{backtest, EngineConfig, ExitReason, Report, Trade, CONTRACT, POINT};
 use xau_sim::strategy::{atr, entry_signals, StratKind, StratParams};
 
 fn arg(name: &str) -> Option<String> {
@@ -73,6 +73,8 @@ fn d3_config() -> EngineConfig {
         flat_before_gap_min: None,
         allowed_hours: Vec::new(),
         spread_pts: 20.0,
+        point: POINT,
+        contract: CONTRACT,
         commission_per_lot: 0.0,
         max_drawdown_pct: 100.0,
     }

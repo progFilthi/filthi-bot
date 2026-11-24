@@ -15,9 +15,10 @@ use xau_core::{Bar, Side};
 
 use crate::strategy::atr;
 
-/// Point size for XAUUSD.
+/// Point size for XAUUSD. The engine itself reads `EngineConfig::point`;
+/// these remain the gold defaults, and `orb.rs` still uses them directly.
 pub const POINT: f64 = 0.01;
-/// Ounces per lot for XAUUSD.
+/// Ounces per lot for XAUUSD. See `POINT`.
 pub const CONTRACT: f64 = 100.0;
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,10 @@ pub struct EngineConfig {
     pub flat_before_gap_min: Option<i64>,
     /// Spread cost in points per round trip.
     pub spread_pts: f64,
+    /// Price value of one point. Gold: 0.01 (a cent). EURUSD: 0.00001.
+    pub point: f64,
+    /// Units of the base asset per lot. Gold: 100 oz. EURUSD: 100,000.
+    pub contract: f64,
     /// Commission per lot per round trip, in account currency.
     pub commission_per_lot: f64,
     /// Kill-switch: halt when equity falls this percent below the start.
@@ -65,6 +70,8 @@ impl Default for EngineConfig {
             allowed_hours: Vec::new(),
             flat_before_gap_min: None,
             spread_pts: 20.0,
+            point: POINT,
+            contract: CONTRACT,
             commission_per_lot: 0.0,
             max_drawdown_pct: 100.0,
         }
@@ -166,7 +173,7 @@ pub struct Report {
 pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> Report {
     let n = bars.len();
     let atrs = atr(bars, cfg.atr_period.max(1));
-    let spread_cost = cfg.spread_pts * POINT * CONTRACT * cfg.lots
+    let spread_cost = cfg.spread_pts * cfg.point * cfg.contract * cfg.lots
         + cfg.commission_per_lot * cfg.lots;
 
     let mut equity = cfg.initial_deposit;
@@ -221,7 +228,7 @@ pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> R
 
             if let Some((px, reason)) = exit {
                 let dir = if p.side == Side::Buy { 1.0 } else { -1.0 };
-                let gross = (px - p.entry) * dir * CONTRACT * p.lots;
+                let gross = (px - p.entry) * dir * cfg.contract * p.lots;
                 let pnl = gross - spread_cost;
                 equity += pnl;
                 trades.push(Trade {
@@ -301,7 +308,7 @@ pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> R
         // ---- 3. Mark to market ----
         let open_pnl = pos.as_ref().map_or(0.0, |p| {
             let dir = if p.side == Side::Buy { 1.0 } else { -1.0 };
-            (bar.close - p.entry) * dir * CONTRACT * p.lots - spread_cost
+            (bar.close - p.entry) * dir * cfg.contract * p.lots - spread_cost
         });
         equity_curve.push(equity + open_pnl);
 
@@ -309,7 +316,7 @@ pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> R
             halted = true;
             if let Some(p) = pos.take() {
                 let dir = if p.side == Side::Buy { 1.0 } else { -1.0 };
-                let pnl = (bar.close - p.entry) * dir * CONTRACT * p.lots - spread_cost;
+                let pnl = (bar.close - p.entry) * dir * cfg.contract * p.lots - spread_cost;
                 equity += pnl;
                 trades.push(Trade {
                     entry_bar: p.entry_bar,
@@ -330,7 +337,7 @@ pub fn backtest(bars: &[Bar], signals: &[Option<Side>], cfg: &EngineConfig) -> R
     if let Some(p) = pos.take() {
         let bar = &bars[n - 1];
         let dir = if p.side == Side::Buy { 1.0 } else { -1.0 };
-        let pnl = (bar.close - p.entry) * dir * CONTRACT * p.lots - spread_cost;
+        let pnl = (bar.close - p.entry) * dir * cfg.contract * p.lots - spread_cost;
         equity += pnl;
         trades.push(Trade {
             entry_bar: p.entry_bar,

@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use xau_data::read_bars_parquet;
-use xau_sim::engine::{backtest, EngineConfig};
+use xau_sim::engine::{backtest, EngineConfig, CONTRACT, POINT};
 use xau_sim::strategy::{entry_signals, StratKind, StratParams};
 
 fn arg(name: &str) -> Option<String> {
@@ -45,6 +45,8 @@ fn main() -> anyhow::Result<()> {
         flat_before_gap_min: None,
         allowed_hours: Vec::new(),
         spread_pts: 20.0,
+        point: POINT,
+        contract: CONTRACT,
         commission_per_lot: 0.0,
         max_drawdown_pct: 100.0,
     };

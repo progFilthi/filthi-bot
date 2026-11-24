@@ -17,6 +17,10 @@ name = "xau-backtest"
 path = "src/bin/backtest.rs"
 
 [[bin]]
+name = "xau-cross"
+path = "src/bin/cross.rs"
+
+[[bin]]
 name = "xau-analyze"
 path = "src/bin/analyze.rs"
 

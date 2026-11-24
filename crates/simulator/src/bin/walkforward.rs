@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::Context;
 use xau_core::{Bar, Side};
 use xau_data::read_bars_parquet;
-use xau_sim::engine::{backtest, EngineConfig, ExitReason, Metrics};
+use xau_sim::engine::{backtest, EngineConfig, ExitReason, Metrics, CONTRACT, POINT};
 use xau_sim::strategy::{entry_signals, StratKind, StratParams};
 
 fn arg(name: &str) -> Option<String> {
@@ -53,6 +53,8 @@ fn base_cfg() -> EngineConfig {
         flat_before_gap_min: None,
         allowed_hours: Vec::new(),
         spread_pts: 20.0,
+        point: POINT,
+        contract: CONTRACT,
         commission_per_lot: 0.0,
         max_drawdown_pct: 100.0,
     }

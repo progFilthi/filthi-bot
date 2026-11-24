@@ -1,0 +1,23 @@
+# GBPUSD contract specs for data imported in TRUE UTC.
+# Same shape as xauusd_utc.toml; only the contract numbers change.
+# Use with: xau data import --config configs/symbols/gbpusd_utc.toml
+
+[symbol]
+name = "GBPUSD"
+digits = 5
+point = 0.00001
+contract_size = 100000.0
+tick_size = 0.00001
+tick_value = 1.0
+volume_min = 0.01
+volume_max = 500.0
+volume_step = 0.01
+stops_level_pts = 0
+freeze_level_pts = 0
+swap_mode = 1
+swap_long_pts = -2.0
+swap_short_pts = -22.0
+swap_rollover3day_dow = 3
+margin_initial = 0.0
+margin_maintenance = 0.0
+server_utc_offset_s = 0
