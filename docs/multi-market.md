@@ -27,6 +27,12 @@ cargo run --release -p xau-sim --bin xau-cross -- \
 | EURUSD | 2.4y | 240 | 0.89 | 35.0% | −$303 | −17 | 31.6 | 2/5 |
 | GBPUSD | 2.9y | 322 | 0.95 | 34.2% | −$217 | −11 | 30.4 | 2/5 |
 | USDJPY | 2.9y | 279 | 1.02 | 34.1% | +$64 | +4 | 46.7 | 3/5 |
+| US30 (Dow) | 2.9y | 186 | 0.91 | 48.4% | −$1,433 | −8 | 22.7 | 1/5 |
+| US500 (S&P) | 2.9y | 209 | 1.03 | 49.8% | +$71 | +3 | 30.5 | 3/5 |
+
+The indices were tested on Yahoo Finance hourly bars (the demo terminal only
+holds two weeks of them), with the demo's live spread: 120 points on US30,
+50 on US500. Both are noise at best. **The rule is gold-specific.**
 
 Gold earns 281R where the best FX pair earns 4R, over a comparable stretch.
 That is not a tuning difference.
@@ -84,3 +90,20 @@ account** — which puts the annual return near 4%. The binding constraint on a
 prop challenge is the drawdown limit, not the trade count, and no amount of
 extra markets changes that arithmetic unless the extra markets are genuinely
 uncorrelated.
+
+## What a small live account would actually have done
+
+`xau-cross --account 50 --live-lots 0.01` walks the real 17-year trade list
+against a starting balance. At the smallest position the broker allows
+(0.01 lot = 1 oz = $1 per $1 move):
+
+* survives all 17 years and ends at **$1,766.70**
+* worst balance **$23.66** — a **53% drawdown** from a $50 start
+* worst single trade **−$99.54**, i.e. twice the starting balance
+
+That last line is the whole problem. The account survived because the bad tail
+arrived after it had grown. Had that trade come first, the account was gone.
+
+Margin is the second wall: the demo is 1:100, and 0.01 lot of gold needs
+**$36.20**. A $50 account would have $13.80 of free margin against a stop that
+risks $30–40.

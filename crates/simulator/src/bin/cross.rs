@@ -20,6 +20,7 @@ use anyhow::Context;
 
 use xau_data::read_bars_parquet;
 use xau_sim::engine::{backtest, EngineConfig};
+use xau_sim::orb::ymd_hms;
 use xau_sim::strategy::{entry_signals, StratKind, StratParams};
 
 fn arg(name: &str) -> Option<String> {
@@ -131,5 +132,47 @@ fn main() -> anyhow::Result<()> {
     println!();
     let positive = pnls.iter().filter(|p| **p > 0.0).count();
     println!("         {positive}/{folds} folds positive");
+
+    // ---- what would this do to a small live account? ----------------------
+    // P&L scales linearly with lot size, so a balance can be walked without
+    // re-running the backtest: every trade is divided by the lot ratio.
+    if let Some(start) = arg("account").and_then(|v| v.parse::<f64>().ok()) {
+        let live_lots = num("live-lots", 0.01);
+        let scale = live_lots / cfg.lots;
+        let mut balance = start;
+        let mut worst = start;
+        let mut killed_at = None;
+        for (i, t) in rep.trades.iter().enumerate() {
+            balance += t.pnl * scale;
+            if balance < worst {
+                worst = balance;
+            }
+            if balance <= 0.0 {
+                let (y, m, d, h, mi) = ymd_hms(bars[t.entry_bar].ts);
+                killed_at = Some((i + 1, format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}")));
+                break;
+            }
+        }
+        println!(
+            "\n${start:.0} account at {live_lots} lots: {}",
+            match killed_at {
+                Some((n, when)) => format!("account wiped on trade {n} ({when} UTC)"),
+                None => format!("survives, ends at ${balance:.2}"),
+            }
+        );
+        println!(
+            "         worst balance ${worst:.2} | single worst trade {:+.2} | maxDD {:.0}% of the account",
+            rep.trades.iter().map(|t| t.pnl * scale).fold(0.0f64, f64::min),
+            (start - worst) / start * 100.0
+        );
+        // The first handful of trades is what a small account actually feels.
+        print!("         first trades:");
+        let mut b = start;
+        for t in rep.trades.iter().take(8) {
+            b += t.pnl * scale;
+            print!(" {:+.0}→{:.0}", t.pnl * scale, b);
+        }
+        println!();
+    }
     Ok(())
 }

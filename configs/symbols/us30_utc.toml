@@ -1,0 +1,28 @@
+# US30 (Dow Jones cash index) — imported from Yahoo Finance hourly bars.
+#
+# NOT the broker's CFD. Prices are index points, so one lot here is one index
+# point: 0.01 lot moves $0.01 per point. The CFD adds an overnight financing
+# and a wider spread; the 120-point spread used in tests is the demo's live
+# quote (1.20 index points). Cash-index bars also have no overnight session,
+# which suits a rule that is flat at the close anyway.
+# Use with: xau data import --config configs/symbols/us30_utc.toml
+
+[symbol]
+name = "US30"
+digits = 2
+point = 0.01
+contract_size = 1.0
+tick_size = 0.01
+tick_value = 0.01
+volume_min = 0.01
+volume_max = 100.0
+volume_step = 0.01
+stops_level_pts = 0
+freeze_level_pts = 0
+swap_mode = 1
+swap_long_pts = -5.0
+swap_short_pts = -5.0
+swap_rollover3day_dow = 3
+margin_initial = 0.0
+margin_maintenance = 0.0
+server_utc_offset_s = 0
