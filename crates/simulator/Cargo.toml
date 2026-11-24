@@ -21,6 +21,10 @@ name = "xau-cross"
 path = "src/bin/cross.rs"
 
 [[bin]]
+name = "xau-scalp"
+path = "src/bin/scalp.rs"
+
+[[bin]]
 name = "xau-analyze"
 path = "src/bin/analyze.rs"
 
