@@ -186,6 +186,9 @@ struct Snapshot {
     market_open: Option<bool>,
     /// Last quote time from the trade server, as the terminal reports it.
     broker_time: String,
+    /// Set while the dashboard's stop switch is on. `None` means the runner is
+    /// free to take entries.
+    paused: Option<market::Pause>,
 }
 
 struct App {
@@ -517,6 +520,9 @@ impl App {
     fn refresh(&self, do_scan: bool) {
         let mut snap = self.snap.read().unwrap().clone();
         snap.ts = Utc::now().timestamp();
+        // Cheap, and it must be right even while the terminal is down: a stop
+        // that only shows once the broker answers is not a stop.
+        snap.paused = market::paused(&self.root);
 
         let result = (|| -> anyhow::Result<()> {
             self.connected_mcp()?;
@@ -631,6 +637,123 @@ impl App {
         *self.snap.write().unwrap() = snap;
         *self.body.write().unwrap() = body.clone();
         let _ = self.tx.send(body);
+    }
+
+    // --- the stop switch -----------------------------------------------------
+
+    /// Stopping writes a file; it does not cancel or close anything. The runner
+    /// reads it on its next poll and refuses new entries. A position that is
+    /// already open keeps its stop and is still closed at the day's end — a
+    /// switch that trapped a live position would be worse than no switch.
+    fn pause(&self, reason: &str) -> (StatusCode, Json<Value>) {
+        let p = market::Pause {
+            since: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            reason: reason.to_string(),
+        };
+        match market::set_paused(&self.root, &p) {
+            Ok(()) => {
+                self.audit("pause", "", None, None, None, None, "", true, reason);
+                self.refresh(false);
+                (StatusCode::OK, Json(json!({ "ok": true, "paused": p })))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.audit("pause", "", None, None, None, None, "", false, &msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "ok": false, "error": msg })),
+                )
+            }
+        }
+    }
+
+    fn resume(&self) -> (StatusCode, Json<Value>) {
+        match market::clear_paused(&self.root) {
+            Ok(()) => {
+                self.audit("resume", "", None, None, None, None, "", true, "entries allowed again");
+                self.refresh(false);
+                (StatusCode::OK, Json(json!({ "ok": true })))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.audit("resume", "", None, None, None, None, "", false, &msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "ok": false, "error": msg })),
+                )
+            }
+        }
+    }
+
+    /// The panic button: stop taking entries *and* close what is open.
+    ///
+    /// The stop file goes down first, so even if a close fails, the runner will
+    /// not add to the position while that failure is being looked at.
+    fn halt(&self) -> (StatusCode, Json<Value>) {
+        let p = market::Pause {
+            since: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            reason: "halted from the dashboard".into(),
+        };
+        if let Err(e) = market::set_paused(&self.root, &p) {
+            let msg = format!("{e:#}");
+            self.audit("halt", "", None, None, None, None, "", false, &msg);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": msg })),
+            );
+        }
+
+        let res = self.with_mcp(|m| {
+            let mut closed: Vec<String> = Vec::new();
+            let mut failed: Vec<String> = Vec::new();
+            for pos in market::positions(m)? {
+                if !market::field(&pos, "symbol").trim().eq_ignore_ascii_case(market::SYMBOL) {
+                    continue;
+                }
+                let ticket = market::field(&pos, "position_id");
+                match trade::close(m, &ticket) {
+                    Ok(_) => {
+                        self.audit("halt_close", "", None, None, None, None, &ticket, true, "closed by halt");
+                        closed.push(ticket);
+                    }
+                    Err(e) => {
+                        let msg = format!("{ticket}: {e:#}");
+                        self.audit("halt_close", "", None, None, None, None, &ticket, false, &msg);
+                        failed.push(msg);
+                    }
+                }
+            }
+            Ok((closed, failed))
+        });
+
+        match res {
+            Ok((closed, failed)) => {
+                self.refresh(false);
+                let detail = format!(
+                    "closed {} · failed {}",
+                    closed.len(),
+                    failed.len()
+                );
+                self.audit("halt", "", None, None, None, None, "", failed.is_empty(), &detail);
+                (
+                    if failed.is_empty() { StatusCode::OK } else { StatusCode::BAD_REQUEST },
+                    Json(json!({
+                        "ok": failed.is_empty(),
+                        "closed": closed,
+                        "failed": failed,
+                        "paused": p
+                    })),
+                )
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.audit("halt", "", None, None, None, None, "", false, &msg);
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "ok": false, "error": msg, "paused": p })),
+                )
+            }
+        }
     }
 
     fn tracks(&self) -> Vec<Track> {
@@ -937,16 +1060,75 @@ async fn api_breakeven(
 }
 
 async fn api_state(State(app): State<Arc<App>>) -> impl IntoResponse {
-    let body = app
-        .body
-        .read()
-        .map(|s| s.clone())
-        .unwrap_or_else(|_| "{}".into());
+    // The cached snapshot, but with the stop flag read fresh: a kill switch
+    // that only shows up on the next poll is a kill switch you cannot trust.
+    let mut snap = app.snap.read().map(|s| s.clone()).unwrap_or_default();
+    snap.paused = market::paused(&app.root);
+    let body = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".into());
     ([("content-type", "application/json")], body)
 }
 
 async fn api_history(State(app): State<Arc<App>>) -> impl IntoResponse {
     ([("content-type", "application/json")], app.history())
+}
+
+/// Stop taking new entries. The runner notices on its next poll.
+async fn api_pause(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = require_token(&app, &headers) {
+        return e;
+    }
+    let reason = body["reason"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("stopped from the dashboard")
+        .to_string();
+    let a = app.clone();
+    match tokio::task::spawn_blocking(move || a.pause(&reason)).await {
+        Ok(r) => r,
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("worker failed: {e}") })),
+        ),
+    }
+}
+
+async fn api_resume(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = require_token(&app, &headers) {
+        return e;
+    }
+    let a = app.clone();
+    match tokio::task::spawn_blocking(move || a.resume()).await {
+        Ok(r) => r,
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("worker failed: {e}") })),
+        ),
+    }
+}
+
+/// Panic: stop entries and close every open position on the symbol.
+async fn api_stop(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = require_token(&app, &headers) {
+        return e;
+    }
+    let a = app.clone();
+    match tokio::task::spawn_blocking(move || a.halt()).await {
+        Ok(r) => r,
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("worker failed: {e}") })),
+        ),
+    }
 }
 
 async fn api_health(State(app): State<Arc<App>>) -> impl IntoResponse {
@@ -984,6 +1166,9 @@ fn router(app: Arc<App>) -> Router {
         .route("/api/order", post(api_order))
         .route("/api/close", post(api_close))
         .route("/api/breakeven", post(api_breakeven))
+        .route("/api/pause", post(api_pause))
+        .route("/api/resume", post(api_resume))
+        .route("/api/stop", post(api_stop))
         .with_state(app)
 }
 

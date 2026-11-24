@@ -484,13 +484,21 @@ mod tests {
     fn signal_source_is_recorded_but_stays_manual() {
         assert_eq!(comment_for(&None), "manual-ui");
         assert_eq!(comment_for(&Some("H1".into())), "manual-ui:H1");
-        assert_eq!(comment_for(&Some(" H4 ".into())), "manual-ui:H4");
+        assert_eq!(
+            comment_for(&Some(" H1 ".into())),
+            "manual-ui:H1",
+            "trimmed"
+        );
         assert_eq!(comment_for(&Some("".into())), "manual-ui");
         assert_eq!(
             comment_for(&Some("M1".into())),
             "manual-ui",
             "not a scanned timeframe"
         );
+        // Retired timeframes fall back to a plain manual tag rather than
+        // producing a comment that claims a signal we no longer scan.
+        assert_eq!(comment_for(&Some("H4".into())), "manual-ui");
+        assert_eq!(comment_for(&Some("M5".into())), "manual-ui");
         assert!(is_ui_comment("manual-ui"));
         assert!(is_ui_comment("manual-ui:H1"));
         assert!(!is_ui_comment("D3-H1"));
@@ -501,7 +509,13 @@ mod tests {
         let mut r = req("buy", 0.01, 3480.0);
         r.source = Some("H2".into());
         assert!(validate(&r, BID, ASK).is_err());
+        // H4 and M5 used to be scanned; they are retired now, so a request
+        // carrying one is a stale client, not a valid signal.
         r.source = Some("H4".into());
+        assert!(validate(&r, BID, ASK).is_err());
+        r.source = Some("M5".into());
+        assert!(validate(&r, BID, ASK).is_err());
+        r.source = Some("H1".into());
         assert!(validate(&r, BID, ASK).is_ok());
     }
 

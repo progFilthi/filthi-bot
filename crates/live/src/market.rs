@@ -6,8 +6,9 @@
 
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDateTime;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::Path;
 
 use xau_core::{Bar, Side};
 use xau_sim::orb::eu_dst_active;
@@ -303,4 +304,54 @@ pub fn analyse_all(m: &mut Mcp) -> Vec<Result<Analysis>> {
 
 pub fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
+}
+
+// --- kill switch ------------------------------------------------------------
+
+/// Where the dashboard's stop button leaves its mark.
+///
+/// A file, not a signal: the dashboard and the runner are separate processes
+/// and either can restart without the other noticing. The runner re-reads this
+/// on every poll, so a stop lands within one poll rather than at the next bar
+/// close, and it stays stopped across a restart of either side.
+pub fn pause_path(root: &Path) -> std::path::PathBuf {
+    root.join("runs/live/trading_paused.json")
+}
+
+/// Why trading is stopped, and since when.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Pause {
+    pub since: String,
+    pub reason: String,
+}
+
+/// `None` means trading is allowed. A file that will not parse still counts as
+/// a stop: if the switch is broken, standing aside is the safe answer.
+pub fn paused(root: &Path) -> Option<Pause> {
+    match std::fs::read_to_string(pause_path(root)) {
+        Ok(text) => Some(serde_json::from_str(&text).unwrap_or_else(|_| Pause {
+            since: String::new(),
+            reason: "stopped".into(),
+        })),
+        Err(_) => None,
+    }
+}
+
+pub fn set_paused(root: &Path, p: &Pause) -> Result<()> {
+    let path = pause_path(root);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(p)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+pub fn clear_paused(root: &Path) -> Result<()> {
+    let path = pause_path(root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
 }

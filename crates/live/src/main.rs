@@ -132,6 +132,11 @@ struct Ctx {
     intraday: bool,
     entry_from: u32,
     entry_to: u32,
+    /// Repo root, used to find the dashboard's stop file.
+    root: PathBuf,
+    /// Whether the stop has already been logged, so an idle paused runner
+    /// writes one line instead of one per minute.
+    paused_seen: bool,
 }
 
 impl Ctx {
@@ -484,6 +489,26 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
         return Ok(true);
     }
 
+    // ---- the dashboard's stop button ---------------------------------------
+    // Checked *after* the position block above, on purpose: a stop must not
+    // trap a live position. The trail keeps trailing and the day-close still
+    // fires; only new entries are refused.
+    if let Some(p) = paused(&ctx.root) {
+        if !ctx.paused_seen {
+            ctx.log(
+                "paused",
+                &[("since", json!(p.since)), ("reason", json!(p.reason)),
+                  ("note", json!("no new entries; an open position is still trailed and closed at the day's end"))],
+            );
+            ctx.paused_seen = true;
+        }
+        return Ok(false);
+    }
+    if ctx.paused_seen {
+        ctx.log("resumed", &[("note", json!("stop file removed; entries allowed again"))]);
+        ctx.paused_seen = false;
+    }
+
     // ---- entry --------------------------------------------------------------
     let params = StratParams { lookback: LOOKBACK, trend_ma: TREND_MA, ..Default::default() };
     let signals = entry_signals(&closed, StratKind::Donchian, &params);
@@ -618,6 +643,8 @@ fn main() -> Result<()> {
         intraday: args.intraday,
         entry_from: args.entry_from,
         entry_to: args.entry_to,
+        root: root.clone(),
+        paused_seen: false,
     };
 
     let mut state = ctx.load();

@@ -33,6 +33,11 @@
   .bad .dot{background:var(--red);box-shadow:0 0 8px var(--red)}
   .ok{color:var(--green);border-color:#1c3f34}
   .bad{color:var(--red);border-color:#432028}
+  .ctl{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;
+       padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+  .ctl.stopped{border-color:#432028;background:#170f12}
+  .ctl .note{color:var(--dim);font-size:12px}
+  .ctl .spacer{flex:1 1 12px;min-width:0}
   .grid{display:grid;gap:12px;margin-top:12px;
         grid-template-columns:minmax(0,1.85fr) minmax(0,1fr)}
   @media (max-width:1020px){.grid{grid-template-columns:1fr}}
@@ -193,6 +198,18 @@
     </div>
   </header>
 
+  <div class="ctl" id="bot-control">
+    <span class="pill" id="bot"><i class="dot"></i><span>bot</span></span>
+    <span class="note" id="bot-note">—</span>
+    <span class="spacer"></span>
+    <button class="tiny danger" id="btn-stop" type="button"
+      title="No new trades. An open position keeps its stop and still closes at the day's end.">Stop bot</button>
+    <button class="tiny danger" id="btn-flatten" type="button"
+      title="Close every open position at market, then stop new trades.">Close all + stop</button>
+    <button class="tiny" id="btn-resume" type="button" hidden>Resume</button>
+  </div>
+
+  <div class="banner" id="pause-banner" hidden></div>
   <div class="banner" id="market-banner" hidden></div>
 
   <div class="grid">
@@ -330,6 +347,9 @@ const mmss = s => { if (s == null || s < 0) return "—";
 const barTime = t => { if (!t) return "—";
   const d = new Date(t*1000);
   return d.toISOString().slice(5,16).replace("T"," "); };
+const clock = iso => { if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}); };
 const sign = v => v > 0 ? "up" : v < 0 ? "down" : "";
 
 let state = null;
@@ -337,6 +357,26 @@ let marketClosed = false;
 
 function render(s){
   state = s;
+
+  // --- bot control ---
+  const paused = s.paused || null;
+  $("bot").className = "pill " + (paused ? "bad" : "ok");
+  $("bot").querySelector("span").textContent = paused ? "bot stopped" : "bot running";
+  $("bot-control").className = "ctl" + (paused ? " stopped" : "");
+  $("bot-note").textContent = paused
+    ? [paused.reason || "stopped", paused.since ? "since " + clock(paused.since) : ""]
+        .filter(Boolean).join(" · ")
+    : "new entries allowed";
+  $("btn-stop").hidden = !!paused;
+  $("btn-flatten").hidden = !!paused;
+  $("btn-resume").hidden = !paused;
+  $("pause-banner").hidden = !paused;
+  if (paused) {
+    $("pause-banner").innerHTML =
+      `<b>Trading stopped.</b> The runner will not open new trades` +
+      (paused.since ? ` — since ${clock(paused.since)}` : "") +
+      `. An open position keeps its stop and is still closed at the day's end.`;
+  }
   const acct = s.account || {};
   $("price").textContent = s.price ? num(s.price) : "—";
   $("equity").textContent = money(acct.equity);
@@ -384,7 +424,10 @@ function render(s){
 
   // --- positions ---
   const pos = s.positions || [];
-  $("pos-count").textContent = pos.length ? `${pos.length} open` : "";
+  const risk = pos.reduce((a, p) => a + (p.risk_usd || 0), 0);
+  $("pos-count").textContent = pos.length
+    ? `${pos.length} open · ${money(risk)} at risk`
+    : "";
   $("positions").innerHTML = pos.length ? pos.map(p => `
     <div class="row"><label>${p.side.toUpperCase()} ${p.lots} lot · <span class="tag">${p.comment || p.kind}</span></label>
       <b class="${sign(p.profit)}">${money(p.profit)}</b></div>
@@ -665,8 +708,33 @@ $("scan").addEventListener("click", e => {
   const b = e.target.closest("button[data-use]");
   if (b) usePlan(b.dataset.period, b.dataset.side, parseFloat(b.dataset.stop));
 });
-$("seg-buy").addEventListener("click", () => setSide("buy"));
-$("seg-sell").addEventListener("click", () => setSide("sell"));
+
+// --- bot control ------------------------------------------------------------
+$("btn-stop").addEventListener("click", async () => {
+  if (!confirm("Stop the bot?\n\nNo new trades will be opened. An open position is left alone — it keeps its stop and is still closed at the day's end.")) return;
+  const r = await postJSON("/api/pause", { reason: "stopped by you from the dashboard" });
+  if (!r.ok) return alert("Stop failed: " + (r.error || "unknown"));
+  loadState();
+});
+
+$("btn-flatten").addEventListener("click", async () => {
+  const n = (state && state.positions) ? state.positions.length : 0;
+  if (!confirm(`Close ${n} open position${n === 1 ? "" : "s"} at market and stop the bot?\n\nThis sends real orders to the demo account.`)) return;
+  const r = await postJSON("/api/stop", {});
+  if (!r.ok) {
+    const why = r.error || (r.failed || []).join("; ") || "unknown";
+    return alert("Halt finished with errors: " + why);
+  }
+  loadState();
+});
+
+$("btn-resume").addEventListener("click", async () => {
+  if (!confirm("Let the bot open new trades again?")) return;
+  const r = await postJSON("/api/resume", {});
+  if (!r.ok) return alert("Resume failed: " + (r.error || "unknown"));
+  loadState();
+});
+$("seg-buy").addEventListener("click", () => setSide("buy"));$("seg-sell").addEventListener("click", () => setSide("sell"));
 ["f-lots","f-stop","f-tp"].forEach(id => $(id).addEventListener("input", invalidate));
 $("btn-review").addEventListener("click", review);
 $("btn-confirm").addEventListener("click", confirmOrder);
