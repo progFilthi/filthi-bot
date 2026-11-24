@@ -166,6 +166,53 @@ struct Track {
     log_age_secs: u64,
 }
 
+/// One closed scalp trade, as the runner recorded it.
+#[derive(Serialize, Clone, Default)]
+struct ScalpTrade {
+    closed: String,
+    side: String,
+    entry: f64,
+    exit: f64,
+    sl: f64,
+    tp: f64,
+    profit: f64,
+    reason: String,
+    bars: u32,
+}
+
+#[derive(Serialize, Clone, Default)]
+struct ScalpOpen {
+    side: String,
+    entry: f64,
+    sl: f64,
+    tp: f64,
+    bars: u32,
+}
+
+/// The M15 EURUSD scalper, read from its own log and state file.
+///
+/// It is a separate process writing a separate JSONL, so this is a file read,
+/// not another terminal connection: the dashboard can show the scalper even
+/// while the MCP session is busy or the scalper is down.
+#[derive(Serialize, Clone, Default)]
+struct Scalp {
+    alive: bool,
+    log_age_secs: u64,
+    /// Entry signals the runner acted on.
+    signals: u32,
+    /// Signals refused by the risk governor.
+    refused: u32,
+    /// Trades the broker closed (stop, target, or manual).
+    closed: u32,
+    wins: u32,
+    losses: u32,
+    net: f64,
+    win_rate: f64,
+    last_risk_pct: f64,
+    open: Option<ScalpOpen>,
+    last: Vec<ScalpTrade>,
+}
+
 #[derive(Serialize, Clone, Default)]
 struct Snapshot {
     ts: i64,
@@ -177,6 +224,8 @@ struct Snapshot {
     positions: Vec<PositionView>,
     analyses: Vec<Analysis>,
     tracks: Vec<Track>,
+    /// The M15 EURUSD scalper, from its own log. Empty when it never ran.
+    scalp: Scalp,
     perf: Perf,
     deals: Vec<Deal>,
     /// Live price from the forming M1 bar.
@@ -631,6 +680,7 @@ impl App {
         }
 
         snap.tracks = self.tracks();
+        snap.scalp = self.scalp();
         self.persist(&snap);
 
         let body = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".into());
@@ -793,8 +843,101 @@ impl App {
             .collect()
     }
 
-    fn persist(&self, snap: &Snapshot) {
-        let Ok(db) = self.db.lock() else { return };
+    /// Read the scalper's own log and state. A file read, not a terminal call:
+    /// the scalper can be down and this still shows what it last did.
+    fn scalp(&self) -> Scalp {
+        let mut s = Scalp::default();
+        let log = self.root.join("runs/live/scalp_eurusd_m15_runner.log");
+        let state = self.root.join("runs/live/scalp_eurusd_m15_state.json");
+
+        s.alive = Command::new("pgrep")
+            .arg("-f")
+            .arg("xau-scalp-live")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|x| x.success())
+            .unwrap_or(false);
+        s.log_age_secs = std::fs::metadata(&log)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX);
+
+        if let Ok(text) = std::fs::read_to_string(&log) {
+            for line in text.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                match v["event"].as_str().unwrap_or("") {
+                    "entry_signal" => {
+                        // A dry run is a rehearsal, not a signal that was
+                        // traded. Counting it would show a signal with no trade
+                        // and no P&L, which reads like a lost order.
+                        if v["dry_run"].as_bool() != Some(true) {
+                            s.signals += 1;
+                            s.last_risk_pct = v["risk_pct"].as_f64().unwrap_or(0.0);
+                        }
+                    }
+                    // The broker closing the position is the only place a
+                    // realised P&L exists, so it is the only thing counted.
+                    "closed_by_broker" => {
+                        let profit = v["profit"].as_f64().unwrap_or(0.0);
+                        s.closed += 1;
+                        if profit > 0.0 {
+                            s.wins += 1;
+                        } else {
+                            s.losses += 1;
+                        }
+                        if profit.is_finite() {
+                            s.net += profit;
+                        }
+                        s.last.push(ScalpTrade {
+                            closed: v["ts"].as_str().unwrap_or("").to_string(),
+                            side: v["side"].as_str().unwrap_or("").to_string(),
+                            entry: v["entry"].as_f64().unwrap_or(0.0),
+                            exit: v["exit"].as_f64().unwrap_or(f64::NAN),
+                            sl: v["sl"].as_f64().unwrap_or(0.0),
+                            tp: v["tp"].as_f64().unwrap_or(0.0),
+                            profit,
+                            reason: v["reason"].as_str().unwrap_or("").to_string(),
+                            bars: v["bars"].as_u64().unwrap_or(0) as u32,
+                        });
+                        if s.last.len() > 20 {
+                            s.last.remove(0);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if s.closed > 0 {
+            s.win_rate = s.wins as f64 / s.closed as f64 * 100.0;
+        }
+
+        // A dead runner's state file is a fossil; never imply it holds a
+        // position it can no longer manage.
+        if let Ok(text) = std::fs::read_to_string(&state) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                s.refused = v["refused_risk"].as_u64().unwrap_or(0) as u32;
+                if s.alive {
+                    if let Some(p) = v["position"].as_object() {
+                        s.open = Some(ScalpOpen {
+                            side: p.get("side").and_then(Value::as_str).unwrap_or("").to_string(),
+                            entry: p.get("entry").and_then(Value::as_f64).unwrap_or(0.0),
+                            sl: p.get("sl").and_then(Value::as_f64).unwrap_or(0.0),
+                            tp: p.get("tp").and_then(Value::as_f64).unwrap_or(0.0),
+                            bars: p.get("bars_held").and_then(Value::as_u64).unwrap_or(0) as u32,
+                        });
+                    }
+                }
+            }
+        }
+        s
+    }
+
+    fn persist(&self, snap: &Snapshot) {        let Ok(db) = self.db.lock() else { return };
         if let Some(a) = &snap.account {
             // One point a minute is plenty for a chart and keeps the file small.
             let bucket = snap.ts / 60 * 60;

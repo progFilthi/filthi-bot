@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # One entry point for the two long-running processes.
 #
-#   ./scripts/app.sh start              build if needed, start both, open the page
+#   ./scripts/app.sh start              build if needed, start all three, open the page
 #   ./scripts/app.sh start --no-build   reuse whatever is already in target/
-#   ./scripts/app.sh stop               stop both
+#   ./scripts/app.sh stop               stop all three
 #   ./scripts/app.sh status             are they up, and what does the board see
-#   ./scripts/app.sh logs               follow both logs (ctrl-c to leave)
+#   ./scripts/app.sh logs               follow every log (ctrl-c to leave)
 #
 # Prerequisites, both outside this repo:
 #   * MetaTrader 5 is running with its MCP server on 127.0.0.1:22346
@@ -21,21 +21,28 @@ PORT="${XAU_DASH_PORT:-8787}"
 URL="http://127.0.0.1:$PORT"
 DASH_BIN="$ROOT/target/release/xau-dashboard"
 LIVE_BIN="$ROOT/target/release/xau-live"
+SCALP_BIN="$ROOT/target/release/xau-scalp-live"
 TOKEN_FILE="$ROOT/runs/live/mcp_token"
 DASH_LOG="$ROOT/runs/live/dashboard.log"
 LIVE_LOG="$ROOT/runs/live/rust_h1_runner.log"
 LIVE_OUT="$ROOT/runs/live/rust_h1_runner.out"
+SCALP_LOG="$ROOT/runs/live/scalp_eurusd_m15_runner.log"
+SCALP_OUT="$ROOT/runs/live/scalp_eurusd_m15_runner.out"
 
 # Matched against the process command line, so it works whether the binary was
 # started from here, from RustRover, or by hand as ./target/release/...
 DASH_PAT="target/release/xau-dashboard"
 LIVE_PAT="target/release/xau-live"
+# Distinct from LIVE_PAT on purpose: "xau-scalp-live" does not contain
+# "target/release/xau-live", so the two patterns never match each other.
+SCALP_PAT="target/release/xau-scalp-live"
 
 say()  { printf '%s\n' "$*"; }
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 
 dash_pids() { pgrep -f "$DASH_PAT" 2>/dev/null || true; }
 live_pids() { pgrep -f "$LIVE_PAT" 2>/dev/null || true; }
+scalp_pids() { pgrep -f "$SCALP_PAT" 2>/dev/null || true; }
 http_code() {
   local c
   c="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "$1" 2>/dev/null)"
@@ -50,24 +57,28 @@ port_open() {
 stop_all() {
   pkill -f "$DASH_PAT" 2>/dev/null
   pkill -f "$LIVE_PAT" 2>/dev/null
+  pkill -f "$SCALP_PAT" 2>/dev/null
   local i
   for i in $(seq 1 24); do
-    [[ -z "$(dash_pids)$(live_pids)" ]] && return 0
+    [[ -z "$(dash_pids)$(live_pids)$(scalp_pids)" ]] && return 0
     sleep 0.25
   done
   pkill -9 -f "$DASH_PAT" 2>/dev/null
   pkill -9 -f "$LIVE_PAT" 2>/dev/null
+  pkill -9 -f "$SCALP_PAT" 2>/dev/null
   sleep 0.5
 }
 
 cmd_status() {
-  local d l c
-  d="$(dash_pids)"; l="$(live_pids)"; c="$(http_code "$URL/healthz")"
+  local d l s c
+  d="$(dash_pids)"; l="$(live_pids)"; s="$(scalp_pids)"; c="$(http_code "$URL/healthz")"
 
   if [[ -n "$d" ]]; then say "dashboard  running (pid $(echo "$d" | tr '\n' ' '))"
   else say "dashboard  stopped"; fi
   if [[ -n "$l" ]]; then say "runner     running (pid $(echo "$l" | tr '\n' ' '))"
   else say "runner     stopped"; fi
+  if [[ -n "$s" ]]; then say "scalper    running (pid $(echo "$s" | tr '\n' ' '))"
+  else say "scalper    stopped"; fi
 
   if [[ "$c" == "000" ]]; then
     say "page       not answering on $URL"
@@ -122,7 +133,7 @@ cmd_start() {
       keep retrying until MetaTrader 5 is up with its MCP server."
 
   if [[ $no_build -eq 1 ]]; then
-    [[ -x "$DASH_BIN" && -x "$LIVE_BIN" ]] || fail "no binaries in target/release yet — run without --no-build"
+    [[ -x "$DASH_BIN" && -x "$LIVE_BIN" && -x "$SCALP_BIN" ]] || fail "no binaries in target/release yet — run without --no-build"
   else
     say "building (a minute or two the first time)…"
     cargo build --release -p xau-dashboard -p xau-live || fail "build failed — fix the error above"
@@ -149,6 +160,10 @@ $(tail -n 15 "$DASH_LOG" 2>/dev/null)"
   # Pointing it at the same file would double every line.
   nohup "$LIVE_BIN" --period H1 --intraday --lots 0.01 --poll 60 >"$LIVE_OUT" 2>&1 &
   disown
+
+  say "starting the scalper (EURUSD M15, 0.01 lot, entries 07:00–18:00 UTC)…"
+  nohup "$SCALP_BIN" --period M15 --symbol EURUSD --lots 0.01 --poll 30 >"$SCALP_OUT" 2>&1 &
+  disown
   sleep 3
 
   say ""
@@ -159,7 +174,7 @@ $(tail -n 15 "$DASH_LOG" 2>/dev/null)"
 }
 
 cmd_logs() {
-  tail -n 20 -f "$DASH_LOG" "$LIVE_LOG" "$LIVE_OUT"
+  tail -n 20 -f "$DASH_LOG" "$LIVE_LOG" "$LIVE_OUT" "$SCALP_LOG" "$SCALP_OUT"
 }
 
 case "${1:-help}" in

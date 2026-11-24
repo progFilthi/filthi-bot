@@ -115,19 +115,59 @@ commission** per round trip. That lands at 0.8 pip — inside the surviving band
 but with almost no room. On such an account this strategy is marginal. On a
 spread-only (markup) account like this demo it is comfortable.
 
-## 7. Can the current runner trade it?
+## 7. The live runner
 
-The stop and target can both go on the order (`trade_send_market_order` takes
-`sl` and `tp`), so MT5 holds them server-side — a 2.9-pip stop does **not**
-depend on the once-a-minute poll. That was the blocker in the earlier note and
-it is not one.
+`xau-scalp-live` (`crates/live/src/bin/scalp_live.rs`) is a **separate binary**
+from the gold D3 runner on purpose. The D3 runner is live and validated, and its
+dashboard, state file and `D3-<period>` comment tag are built around one rule on
+one symbol. The scalper owns `SC-<period>` instead, so the two can never claim
+each other's positions, and a bug here cannot touch the gold path.
 
-What would have to change in `crates/live`:
+What it does, once per closed M15 bar:
 
-1. `SCAN_PERIODS` accepts only `H1`; M15 is rejected outright.
-2. The runner is hard-wired to `XAUUSD`, `POINT` 0.01 and `CONTRACT` 100.
-3. It sends no `tp`, and there is no bar-count time exit.
-4. The signal is Donchian; it would need Bollinger.
+| step | behaviour |
+| --- | --- |
+| manage first | 8-bar time exit, then flat before the weekend gap |
+| stop and target | both sent with the order, so **MT5 holds them** — a 3-pip stop does not depend on the poll |
+| trailing | none; the tested rule has none |
+| entry | market order on the signal from the last closed bar |
+| window | entries only when the next bar opens 07:00–18:00 UTC |
+| governor | refuses any trade whose stop risks more than `--max-risk-pct` (2%) of equity |
+| margin | refuses when free margin cannot cover the position plus 3× the risk |
+| kill switch | honours the dashboard's stop file; an open position still exits on time |
 
-All four are contained changes, but they are real work and they must be tested
-on demo before any real money.
+Two details that are easy to get wrong and are therefore explicit in the code:
+
+* **The weekend close.** Gold has a daily break at 23:00 server, FX does not.
+  Reusing the gold helper would have flattened every night, which the backtest
+  never did. `is_week_last_bar` closes only the bar that ends on Saturday 00:00.
+* **Which bar is closed.** The runner drops the last bar of every response
+  unconditionally, because that is the one still forming. Deciding it from the
+  clock instead let an early version read a bar whose close was still moving —
+  look-ahead by another name. The same fix went into the gold runner.
+
+### The governor is the part that makes $50 safe
+
+It is one comparison — `risk / equity * 100 <= cap` — and it is unit-tested both
+ways:
+
+| account | instrument | stop risk | verdict |
+| --- | --- | --- | --- |
+| $50 | EURUSD 0.01 | $0.29 | allowed (0.6%) |
+| $50 | gold 0.01 | $1.62 | **refused** (3.2%) |
+| $5,000 | gold 0.01 | $1.62 | allowed (0.03%) |
+
+So the same binary is safe on $50 and would correctly refuse to trade gold
+there, without either being a special case.
+
+### Running it
+
+```bash
+./scripts/app.sh start      # dashboard + gold H1 runner + EURUSD M15 scalper
+./scripts/app.sh status
+./scripts/app.sh logs
+```
+
+The dashboard has a **Scalper** panel reading the runner's own JSONL, so its
+trades, win rate, last risk and any refusals are visible without touching the
+terminal session.

@@ -85,6 +85,18 @@ pub fn in_entry_window(hour_utc: u32) -> bool {
     hour_utc >= ENTRY_FROM_UTC && hour_utc <= ENTRY_TO_UTC
 }
 
+/// True when this bar is the last one before the weekend close.
+///
+/// FX on this broker runs 24h from Monday 00:00 to Friday 23:45 server, so the
+/// only gap is the weekend. That is what the backtest's `flat_before_gap_min`
+/// rule closes before — gold has a daily break at 23:00 server, FX does not, so
+/// reusing `is_day_last_bar` here would flatten every night and change the rule.
+pub fn is_week_last_bar(ts_server: i64, period_secs: i64) -> bool {
+    let close = ts_server + period_secs;
+    // 1970-01-01 was a Thursday, so day 0 + 3 is a Monday and 5 is Saturday.
+    (close.div_euclid(86_400) + 3).rem_euclid(7) == 5 && close.rem_euclid(86_400) == 0
+}
+
 pub fn strategy_params() -> StratParams {
     StratParams { lookback: LOOKBACK, trend_ma: TREND_MA, ..Default::default() }
 }
@@ -118,6 +130,23 @@ pub fn bars(m: &mut Mcp, period: &str, count: usize) -> Result<Vec<Bar>> {
 /// Same as `bars`, but reuses a clock the caller already read. Saves one
 /// round-trip per timeframe when several are being scanned.
 pub fn bars_at(m: &mut Mcp, period: &str, count: usize, now: NaiveDateTime) -> Result<Vec<Bar>> {
+    bars_for_at(m, SYMBOL, period, count, now)
+}
+
+/// `bars` for any symbol. The D3 rule is gold-only, so the older helpers above
+/// stay pinned to `SYMBOL`; the M15 scalper trades EURUSD and needs its own.
+pub fn bars_for(m: &mut Mcp, symbol: &str, period: &str, count: usize) -> Result<Vec<Bar>> {
+    let now = server_now(m)?;
+    bars_for_at(m, symbol, period, count, now)
+}
+
+pub fn bars_for_at(
+    m: &mut Mcp,
+    symbol: &str,
+    period: &str,
+    count: usize,
+    now: NaiveDateTime,
+) -> Result<Vec<Bar>> {
     let per = period_secs(period)?;
     let span_days = (count as f64 * per as f64 / 84_600.0 * 2.2).ceil() as i64 + 10;
     let from = now - chrono::Duration::days(span_days);
@@ -126,7 +155,7 @@ pub fn bars_at(m: &mut Mcp, period: &str, count: usize, now: NaiveDateTime) -> R
     let page = m.call(
         "get_chart_history",
         json!({
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "period": period,
             "datetime_from": from.format("%Y-%m-%dT%H:%M:%S").to_string(),
             "datetime_to": to.format("%Y-%m-%dT%H:%M:%S").to_string(),
@@ -166,6 +195,29 @@ pub fn closed_bars(m: &mut Mcp, period: &str, count: usize) -> Result<(Vec<Bar>,
     Ok((closed_bars_at(m, period, count, now)?, now.and_utc().timestamp()))
 }
 
+pub fn closed_bars_for(
+    m: &mut Mcp,
+    symbol: &str,
+    period: &str,
+    count: usize,
+) -> Result<(Vec<Bar>, i64)> {
+    let now = server_now(m)?;
+    let per = period_secs(period)?;
+    let all = bars_for_at(m, symbol, period, count, now)?;
+    let now = now.and_utc().timestamp();
+    if all.is_empty() {
+        bail!("no bars returned for {period}");
+    }
+    Ok((
+        if all.last().unwrap().ts + per <= now {
+            all
+        } else {
+            all[..all.len() - 1].to_vec()
+        },
+        now,
+    ))
+}
+
 pub fn closed_bars_at(
     m: &mut Mcp,
     period: &str,
@@ -187,6 +239,11 @@ pub fn closed_bars_at(
 
 pub fn last_price(m: &mut Mcp) -> Result<f64> {
     let b = bars(m, "M1", 2)?;
+    b.last().map(|b| b.close).context("no M1 bars")
+}
+
+pub fn last_price_for(m: &mut Mcp, symbol: &str) -> Result<f64> {
+    let b = bars_for(m, symbol, "M1", 2)?;
     b.last().map(|b| b.close).context("no M1 bars")
 }
 
@@ -353,5 +410,40 @@ pub fn clear_paused(root: &Path) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ts(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> i64 {
+        chrono::NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(hh, mm, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+    }
+
+    #[test]
+    fn weekend_close_is_fridays_last_bar() {
+        // 2026-11-27 is a Friday. FX runs 24h to 23:45 server, so the M15 bar
+        // that closes on Saturday 00:00 is the last one before the gap.
+        assert!(is_week_last_bar(ts(2026, 11, 27, 23, 45), 900));
+        assert!(is_week_last_bar(ts(2026, 11, 27, 23, 0), 3600));
+        // Any other weekday, and the bars just before it, are not the close.
+        assert!(!is_week_last_bar(ts(2026, 11, 26, 23, 45), 900));
+        assert!(!is_week_last_bar(ts(2026, 11, 27, 23, 30), 900));
+        assert!(!is_week_last_bar(ts(2026, 11, 27, 23, 15), 3600));
+        assert!(!is_week_last_bar(ts(2026, 11, 30, 0, 0), 900));
+    }
+
+    #[test]
+    fn entry_window_edges_are_inclusive() {
+        assert!(in_entry_window(7));
+        assert!(in_entry_window(18));
+        assert!(!in_entry_window(6));
+        assert!(!in_entry_window(19));
     }
 }

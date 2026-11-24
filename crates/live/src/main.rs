@@ -369,13 +369,14 @@ fn run_once(ctx: &mut Ctx, state: &mut State) -> Result<bool> {
     if all.is_empty() {
         bail!("no bars returned for {}", ctx.period);
     }
-    let now = server_now(&mut ctx.mcp)?.and_utc().timestamp();
-    let last_ts = all.last().unwrap().ts;
-    let closed: Vec<Bar> = if last_ts + ctx.bar_secs <= now {
-        all.clone()
-    } else {
-        all[..all.len() - 1].to_vec()
-    };
+    // Drop the last bar unconditionally: it is the one still forming. Deciding
+    // this from the clock instead is what let an early version read a bar whose
+    // close was still moving — a closed bar's close never changes, and the next
+    // bar existing is the only proof that it is done.
+    if all.len() < 2 {
+        bail!("need at least two bars to find a closed one");
+    }
+    let closed: Vec<Bar> = all[..all.len() - 1].to_vec();
     if closed.len() < TREND_MA + 2 {
         bail!("need {} bars, got {}", TREND_MA + 2, closed.len());
     }

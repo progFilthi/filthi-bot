@@ -285,6 +285,22 @@
   </div>
 
   <div class="grid">
+    <section class="card wide">
+      <h2><span>Scalper · EURUSD M15</span><span class="muted" id="sc-status">—</span></h2>
+      <div class="kpis">
+        <div class="kpi"><label>Net</label><b id="sc-net">—</b></div>
+        <div class="kpi"><label>Trades</label><b id="sc-n">—</b></div>
+        <div class="kpi"><label>Win rate</label><b id="sc-win">—</b></div>
+        <div class="kpi"><label>Last risk</label><b id="sc-risk">—</b></div>
+        <div class="kpi"><label>Refused</label><b id="sc-ref">—</b></div>
+      </div>
+      <div class="row" style="margin-top:10px"><label>Open</label><span id="sc-open">flat</span></div>
+      <div class="note" id="sc-note"></div>
+      <div class="feed" id="sc-feed"><div class="empty">no closed trades yet</div></div>
+    </section>
+  </div>
+
+  <div class="grid">
     <section class="card">
       <h2><span>Equity</span><span class="muted" id="eq-range"></span></h2>
       <svg id="chart" viewBox="0 0 600 140" preserveAspectRatio="none"></svg>
@@ -447,6 +463,37 @@ function render(s){
       <label>${t.period} <span class="${t.alive?"up":"warn"}">${t.alive?"running":"stopped"}</span></label>
       <span class="muted">${t.open_position ? "position " + t.open_position : "flat"} · ${t.closed_trades} closed</span>
     </div>`).join("") || `<div class="empty">no runners</div>`;
+
+  // --- scalper (read from its own log, not from the terminal) ---
+  const sc = s.scalp || {};
+  const scAlive = !!sc.alive;
+  $("sc-status").textContent = scAlive
+    ? "running · EURUSD 0.01 lot"
+    : (sc.log_age_secs != null && sc.log_age_secs < 1e9
+        ? `stopped · last wrote ${Math.round(sc.log_age_secs / 60)}m ago`
+        : "stopped");
+  $("sc-status").className = scAlive ? "up" : "muted";
+  kpi("sc-net", money(sc.net), sign(sc.net));
+  kpi("sc-n", sc.closed ? `${sc.closed} (${sc.wins}W/${sc.losses}L)` : "0");
+  kpi("sc-win", sc.closed ? pct(sc.win_rate) : "—");
+  kpi("sc-risk", sc.last_risk_pct ? sc.last_risk_pct.toFixed(2) + "%" : "—");
+  kpi("sc-ref", sc.refused || 0, sc.refused ? "warn" : "");
+  $("sc-open").innerHTML = sc.open
+    ? `${sc.open.side.toUpperCase()} @ ${num(sc.open.entry, 5)} · stop ${num(sc.open.sl, 5)} · target ${num(sc.open.tp, 5)} · ${sc.open.bars} bars`
+    : `<span class="muted">flat</span>`;
+  $("sc-note").textContent = sc.closed
+    ? `${sc.signals} entries taken · fades a close outside the 2σ band, 0.5 ATR stop, 1.5 ATR target, out after 8 bars`
+    : "waiting for the first trade — the rule takes about 5 a day inside 07:00–18:00 UTC";
+  const scLast = (sc.last || []).slice().reverse();
+  $("sc-feed").innerHTML = scLast.length ? scLast.map(t => `
+    <div class="item">
+      <span class="t">${(t.closed||"").slice(5,16).replace("T"," ")}</span>
+      <span class="sig ${t.side}">${(t.side||"").toUpperCase()}</span>
+      <span class="tag">${t.reason || "closed"}</span>
+      <span class="muted">${t.bars} bars</span>
+      <span class="muted">${num(t.entry,5)} → ${num(t.exit,5)}</span>
+      <span class="amt ${sign(t.profit)}">${money(t.profit)}</span>
+    </div>`).join("") : `<div class="empty">no closed trades yet</div>`;
 
   // --- performance ---
   kpi("k-strat", money(perf.strategy_net), sign(perf.strategy_net));
